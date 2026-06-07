@@ -5,7 +5,7 @@ from typing import Any
 
 from vllm.kalypso.budget import KVMemoryManager
 from vllm.kalypso.context import RETRY_TASK, RetryTaskResult
-from vllm.kalypso.sem_ops import OpKind, ops
+from vllm.kalypso.sem_ops import OpBehavior, ops
 
 
 _TASK_IDS = count()
@@ -27,13 +27,13 @@ class Stage:
         self,
         stage_id: int,
         operators,
-        kind: OpKind | None = None,
+        behavior: OpBehavior | None = None,
         fanout_op=None,
         priority_offset: int = 0,
     ):
         self.stage_id = stage_id
         self.operators = tuple(operators)
-        self.kind = kind or self._infer_kind()
+        self.behavior = behavior or self._infer_behavior()
         self.fanout_op = fanout_op
         self.priority_offset = priority_offset
         self.waiting_tasks = []
@@ -42,8 +42,8 @@ class Stage:
         self.low_threshold = 1
         self.high_threshold = 5
 
-    def _infer_kind(self) -> OpKind:
-        return OpKind.TUPLE_INDEPENDENT
+    def _infer_behavior(self) -> OpBehavior:
+        return OpBehavior.TUPLE_INDEPENDENT
 
     def task_priority(self, task: Task) -> int:
         if task.retry_priority is not None:

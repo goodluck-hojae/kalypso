@@ -4,10 +4,10 @@ from enum import Enum, auto
 
 
 # ============================================================
-# Mock OpKind
+# Mock OpBehavior
 # ============================================================
 
-class OpKind(Enum):
+class OpBehavior(Enum):
     TUPLE_INDEPENDENT = auto()
     JOIN = auto()
     BLOCKING = auto()
@@ -18,8 +18,8 @@ class OpKind(Enum):
 # ============================================================
 
 class BaseOp:
-    def __init__(self, kind):
-        self.kind = kind
+    def __init__(self, behavior):
+        self.behavior = behavior
         self.pin = False
         self.unpin = False
 
@@ -29,27 +29,27 @@ class BaseOp:
 
 class SemFilter(BaseOp):
     def __init__(self):
-        super().__init__(OpKind.TUPLE_INDEPENDENT)
+        super().__init__(OpBehavior.TUPLE_INDEPENDENT)
 
 
 class SemMap(BaseOp):
     def __init__(self):
-        super().__init__(OpKind.TUPLE_INDEPENDENT)
+        super().__init__(OpBehavior.TUPLE_INDEPENDENT)
 
 
 class SemClassify(BaseOp):
     def __init__(self):
-        super().__init__(OpKind.TUPLE_INDEPENDENT)
+        super().__init__(OpBehavior.TUPLE_INDEPENDENT)
 
 
 class SemAgg(BaseOp):
     def __init__(self):
-        super().__init__(OpKind.BLOCKING)
+        super().__init__(OpBehavior.BLOCKING)
 
 
 class CartesianProduct(BaseOp):
     def __init__(self):
-        super().__init__(OpKind.JOIN)
+        super().__init__(OpBehavior.JOIN)
 
 
 # ============================================================
@@ -69,7 +69,7 @@ def apply_pin_unpin(ops_list):
     state = NORMAL
     chain = []
 
-    def finalize_chain(next_kind):
+    def finalize_chain(next_behavior):
         nonlocal chain, state
         if not chain:
             return
@@ -81,14 +81,14 @@ def apply_pin_unpin(ops_list):
         first = chain[0]
         last = chain[-1]
 
-        if next_kind == OpKind.JOIN:
+        if next_behavior == OpBehavior.JOIN:
             first.pin = True
 
-        elif next_kind == OpKind.BLOCKING:
+        elif next_behavior == OpBehavior.BLOCKING:
             first.pin = True
             last.unpin = True
 
-        elif next_kind is None:
+        elif next_behavior is None:
             if len(chain) > 1:
                 first.pin = True
                 last.unpin = True
@@ -99,24 +99,24 @@ def apply_pin_unpin(ops_list):
 
     for i, op in enumerate(ops_list):
         next_op = ops_list[i + 1] if i + 1 < n else None
-        next_kind = next_op.kind if next_op else None
+        next_behavior = next_op.behavior if next_op else None
 
-        if op.kind == OpKind.TUPLE_INDEPENDENT:
+        if op.behavior == OpBehavior.TUPLE_INDEPENDENT:
             chain.append(op)
 
-            if next_op is None or next_kind != OpKind.TUPLE_INDEPENDENT:
-                finalize_chain(next_kind)
+            if next_op is None or next_behavior != OpBehavior.TUPLE_INDEPENDENT:
+                finalize_chain(next_behavior)
 
-        elif op.kind == OpKind.JOIN:
+        elif op.behavior == OpBehavior.JOIN:
             state = AFTER_CP
             chain = []
 
-        elif op.kind == OpKind.BLOCKING:
+        elif op.behavior == OpBehavior.BLOCKING:
             state = NORMAL
             chain = []
 
         else:
-            raise ValueError("Unknown OpKind")
+            raise ValueError("Unknown OpBehavior")
 
     return ops_list
 

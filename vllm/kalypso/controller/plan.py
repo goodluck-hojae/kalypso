@@ -1,6 +1,6 @@
 import random
 
-from vllm.kalypso.sem_ops import OpKind, OpName, ops
+from vllm.kalypso.sem_ops import OpBehavior, OpName, ops
 from vllm.kalypso.query import Query
 from vllm.kalypso.data import data
 from vllm.kalypso.budget import KVMemoryManager
@@ -149,26 +149,26 @@ class SemanticPlan:
 
         for op in operators:
 
-            if op.kind == OpKind.TUPLE_INDEPENDENT:
+            if op.behavior == OpBehavior.TUPLE_INDEPENDENT:
                 stage_ops_chain.append(op)
                 continue
 
             # boundary encountered
             emit_stage()
 
-            if op.kind == OpKind.JOIN:  # CP
+            if op.behavior == OpBehavior.JOIN:  # CP
                 if not current_segment:
                     flush_segment()
                     plan.append(op)
                 else:
                     current_segment[-1].fanout_op = op
 
-            elif op.kind == OpKind.BLOCKING:
+            elif op.behavior == OpBehavior.BLOCKING:
                 flush_segment()
                 plan.append(op)
 
             else:
-                raise ValueError(f"Unknown op kind: {op.kind}")
+                raise ValueError(f"Unknown op behavior: {op.behavior}")
 
         # tail flush
         emit_stage()
@@ -192,9 +192,9 @@ class SemanticPlan:
                     )
                     print(
                         f"  ({j}) STAGE stage_id={stage.stage_id} "
-                        f"kind={stage.kind.name} ops={op_names} fanout={fanout_name}"
+                        f"behavior={stage.behavior.name} ops={op_names} fanout={fanout_name}"
                     )
-            elif isinstance(item, ops.BaseOp) and item.kind == OpKind.JOIN:
+            elif isinstance(item, ops.BaseOp) and item.behavior == OpBehavior.JOIN:
                 print(f"[{i}] JOIN {item.__class__.__name__}")
             else:
                 # Blocking op
@@ -212,7 +212,7 @@ class SemanticPlan:
 
             chain = []
 
-            def finalize_chain(next_kind):
+            def finalize_chain(next_behavior):
                 nonlocal chain
                 if not chain:
                     return
@@ -220,11 +220,11 @@ class SemanticPlan:
                 first = chain[0]
 
                 # Chain feeds CP
-                if next_kind == OpKind.JOIN:
+                if next_behavior == OpBehavior.JOIN:
                     first.pin = True
 
                 # End of query
-                elif next_kind is None:
+                elif next_behavior is None:
                     if len(chain) > 1:
                         last = chain[-1]
                         first.pin = True
@@ -236,14 +236,14 @@ class SemanticPlan:
 
             for i, op in enumerate(ops_list):
                 next_op = ops_list[i + 1] if i + 1 < n else None
-                next_kind = next_op.kind if next_op else None
+                next_behavior = next_op.behavior if next_op else None
 
-                if op.kind == OpKind.TUPLE_INDEPENDENT:
+                if op.behavior == OpBehavior.TUPLE_INDEPENDENT:
                     chain.append(op)
 
                     # boundary detected
-                    if next_op is None or next_kind != OpKind.TUPLE_INDEPENDENT:
-                        finalize_chain(next_kind)
+                    if next_op is None or next_behavior != OpBehavior.TUPLE_INDEPENDENT:
+                        finalize_chain(next_behavior)
 
                 else:
                     chain = []

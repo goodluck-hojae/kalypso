@@ -6,7 +6,7 @@ from vllm.kalypso.budget import KVMemoryManager
 from vllm.kalypso.context import RetryTaskResult
 # from vllm.kalypso.controller.map_estimator import MapRatioEstimator
 from vllm.kalypso.controller.stage import Task
-from vllm.kalypso.sem_ops import OpKind, ops
+from vllm.kalypso.sem_ops import OpBehavior, ops
 
 
 class PlanExecutor:
@@ -21,10 +21,10 @@ class PlanExecutor:
         for item in plan:
 
             # BLOCKING
-            if isinstance(item, ops.BaseOp) and item.kind == OpKind.BLOCKING:
+            if isinstance(item, ops.BaseOp) and item.behavior == OpBehavior.BLOCKING:
                 ctxs = await item(ctxs)
 
-            elif isinstance(item, ops.BaseOp) and item.kind == OpKind.JOIN:
+            elif isinstance(item, ops.BaseOp) and item.behavior == OpBehavior.JOIN:
                 next_ctxs = []
                 for ctx in ctxs:
                     next_ctxs.extend(item(ctx) or [])
