@@ -1,5 +1,9 @@
 # Kalypso: Relational LLM Serving
 
+<p align="center">
+  <img src="icon.png" alt="Kalypso logo" width="420">
+</p>
+
 This repository is built on top of vLLM `v0.13.0rc4` with an added semantic
 query processor under `vllm/kalypso`.
 
