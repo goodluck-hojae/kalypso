@@ -37,28 +37,6 @@ VLLM_ENABLE_V1_MULTIPROCESSING=0 vllm serve \
   --port 8003
 ```
 
-Equivalent JSON-style args:
-
-```json
-{
-  "args": [
-    "--model",
-    "meta-llama/Llama-3.3-70B-Instruct",
-    "--tensor-parallel-size",
-    "4",
-    "--gpu-memory-utilization",
-    "0.8",
-    "--enable-prefix-caching",
-    "--max-model-len",
-    "32768",
-    "--port",
-    "8003"
-  ],
-  "env": {
-    "VLLM_ENABLE_V1_MULTIPROCESSING": "0"
-  }
-}
-```
 
 ## Run ICP and Cascade Services
 
