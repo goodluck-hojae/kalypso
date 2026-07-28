@@ -92,17 +92,14 @@ Full benchmark datasets are available as zip files on
 
 ## Citation
 
-If you use Kalypso, please cite:
+If you use Kalypso, please cite our [paper](https://arxiv.org/abs/2607.23815):
 
 ```bibtex
 @misc{son2026kalypsorelationalllmserving,
   title={Kalypso: Relational LLM Serving},
   author={Hojae Son and Md Ashraful Islam and Huy Gia Cao and Hui Guan and Marco Serafini},
   year={2026},
-  eprint={2607.23815},
   archivePrefix={arXiv},
-  primaryClass={cs.DB},
-  url={https://arxiv.org/abs/2607.23815},
 }
 ```
 
