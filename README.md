@@ -9,7 +9,7 @@
 This repository is built on top of vLLM `v0.13.0rc4` with an added semantic
 query processor under [`vllm/kalypso`](./vllm/kalypso).
 
-[`Kalypso`](https://en.wikipedia.org/wiki/Calypso_(mythology)) is a relational LLM serving system that executes semantic query plans
+[Kalypso](https://en.wikipedia.org/wiki/Calypso_(mythology)) is a relational LLM serving system that executes semantic query plans
 as memory-aware pipelines, reusing KV-cache state across operators to reduce
 recomputation and improve query completion time.
 
