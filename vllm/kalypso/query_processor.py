@@ -14,8 +14,9 @@ class QueryProcessor:
     STUCK_CONFIRMATION_COUNT = 2
     UNPIN_COOLDOWN_SEC = 10.0
 
-    def __init__(self, model_name, budget):
+    def __init__(self, model_name, budget, virtual_pinning: bool = True):
         self.model_name = model_name
+        self.virtual_pinning = virtual_pinning
         KVMemoryManager.init(model_name, budget)
         self.executor = VLLMExecutor(model=model_name)
         self._stuck_monitor_task = None
@@ -44,7 +45,7 @@ class QueryProcessor:
 
  
     async def execute(self, raw_request, query: Query):
-        plan = SemanticPlan(self.executor)
+        plan = SemanticPlan(self.executor, virtual_pinning=self.virtual_pinning)
         owner_key = str(id(raw_request))
         try:
             return await plan.execute(raw_request, query)
