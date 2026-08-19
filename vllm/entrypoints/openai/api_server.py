@@ -633,7 +633,11 @@ async def semantic_query(
     print('query called')
 
     processor = raw_request.app.state.query_processor
-    out_ctxs = await processor.execute(raw_request, _query)
+    out_ctxs = await processor.execute(
+        raw_request,
+        _query,
+        blocking=sem_request.blocking,
+    )
 
     results = []
     for ctx in out_ctxs:
@@ -660,6 +664,7 @@ async def semantic_query(
         "model_name": processor.model_name,
         "data_path": sem_request.data_path,
         "ops": sem_request.ops,
+        "blocking": sem_request.blocking,
         "num_output_rows": len(out_ctxs),
         "latency_sec": round(elapsed, 3),
         "results": results,

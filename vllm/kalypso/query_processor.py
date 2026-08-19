@@ -1,6 +1,10 @@
-from pathlib import Path
 import asyncio
+import json
+from pathlib import Path
 from time import monotonic
+from uuid import uuid4
+
+from prometheus_client import REGISTRY
 
 from vllm.kalypso.budget import KVMemoryManager
 from vllm.kalypso.query import Query
@@ -13,16 +17,77 @@ class QueryProcessor:
     STUCK_CHECK_INTERVAL_SEC = 2.0
     STUCK_CONFIRMATION_COUNT = 2
     UNPIN_COOLDOWN_SEC = 10.0
+    LOG_QUERY_KV_STATS = True
 
-    def __init__(self, model_name, budget, virtual_pinning: bool = True):
+    _KV_METRICS = {
+        "prefix_queries": "vllm:prefix_cache_queries_total",
+        "prefix_hits": "vllm:prefix_cache_hits_total",
+        # The histogram count is the number of observed block evictions.
+        "evicted_blocks": "vllm:kv_block_lifetime_seconds_count",
+    }
+
+    def __init__(
+        self,
+        model_name,
+        budget,
+        virtual_pinning: bool = True,
+        blocking: bool = False,
+    ):
         self.model_name = model_name
         self.virtual_pinning = virtual_pinning
+        self.blocking = blocking
         KVMemoryManager.init(model_name, budget)
         self.executor = VLLMExecutor(model=model_name)
         self._stuck_monitor_task = None
         self._last_unpin_at = 0.0
         self._consecutive_stuck_checks = 0
         self._consecutive_timeout_checks = 0
+
+    @classmethod
+    def _kv_metric_snapshot(cls) -> dict[str, float]:
+        """Read process-wide cumulative vLLM KV metrics.
+
+        Prefix query/hit counters are token counts. Evictions are exact when
+        vLLM is started with ``--kv-cache-metrics-sample 1.0``; otherwise the
+        histogram count is only the sampled number of evictions.
+        """
+        wanted = set(cls._KV_METRICS.values())
+        totals = {name: 0.0 for name in wanted}
+        found = set()
+        for metric in REGISTRY.collect():
+            for sample in metric.samples:
+                if sample.name in wanted:
+                    found.add(sample.name)
+                    totals[sample.name] += float(sample.value)
+        snapshot = {
+            key: totals[name]
+            for key, name in cls._KV_METRICS.items()
+        }
+        snapshot["eviction_metric_available"] = float(
+            cls._KV_METRICS["evicted_blocks"] in found
+        )
+        return snapshot
+
+    @staticmethod
+    def _query_kv_delta(
+        before: dict[str, float], after: dict[str, float]
+    ) -> dict[str, int | float]:
+        queried = max(0, round(after["prefix_queries"] - before["prefix_queries"]))
+        reused = max(0, round(after["prefix_hits"] - before["prefix_hits"]))
+        evicted = max(0, round(after["evicted_blocks"] - before["evicted_blocks"]))
+        return {
+            "prefix_tokens_queried": queried,
+            "prefix_tokens_reused": reused,
+            "prefix_hit_fraction": reused / queried if queried else 0.0,
+            "kv_blocks_evicted": evicted,
+            "kv_eviction_metric_available": bool(
+                after.get("eviction_metric_available", 0.0)
+            ),
+            # vLLM exposes cache misses, but does not distinguish cold tokens
+            # from tokens recomputed after an earlier eviction without keeping
+            # extra history in the core.
+            "prefix_tokens_computed_on_miss": max(0, queried - reused),
+        }
 
 
     def parse(self, query: Query):
@@ -44,13 +109,40 @@ class QueryProcessor:
                 yield ctx
 
  
-    async def execute(self, raw_request, query: Query):
-        plan = SemanticPlan(self.executor, virtual_pinning=self.virtual_pinning)
+    async def execute(
+        self,
+        raw_request,
+        query: Query,
+        blocking: bool | None = None,
+    ):
+        effective_blocking = self.blocking if blocking is None else blocking
+        plan = SemanticPlan(
+            self.executor,
+            virtual_pinning=self.virtual_pinning,
+            blocking=effective_blocking,
+        )
         owner_key = str(id(raw_request))
+        query_id = f"query-{uuid4().hex}"
+        started_at = monotonic()
+        kv_before = self._kv_metric_snapshot()
         try:
             return await plan.execute(raw_request, query)
         finally:
             await self._cleanup_query_pins(raw_request, owner_key)
+            if self.LOG_QUERY_KV_STATS:
+                stats = self._query_kv_delta(
+                    kv_before,
+                    self._kv_metric_snapshot(),
+                )
+                stats.update({
+                    "query_id": query_id,
+                    "elapsed_seconds": monotonic() - started_at,
+                    "scope": "process_delta",
+                })
+                print(
+                    "[QueryProcessor] QUERY_KV_STATS "
+                    + json.dumps(stats, sort_keys=True)
+                )
 
     def start_stuck_monitor(self, engine_client):
         if self._stuck_monitor_task is None or self._stuck_monitor_task.done():

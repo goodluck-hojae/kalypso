@@ -11,13 +11,25 @@ from .stage import Stage, Task, stage_builder
 class SemanticPlan:
     ESTIMATED_CTX_SAMPLE_SIZE = 100
 
-    def __init__(self, executor, virtual_pinning: bool = True):
+    def __init__(
+        self,
+        executor,
+        virtual_pinning: bool = True,
+        blocking: bool = False,
+    ):
         self.executor = executor
         self.plan_executor = PlanExecutor()
         self.virtual_pinning = virtual_pinning
+        self.blocking = blocking
 
 
     def build(self, ctxs, operators):
+
+        if self.blocking:
+            for op in operators:
+                if op.behavior == OpBehavior.TUPLE_INDEPENDENT:
+                    op.behavior = OpBehavior.BLOCKING
+            return list(operators)
 
         plan = []
 
@@ -211,7 +223,7 @@ class SemanticPlan:
                 op.pin = False
                 op.unpin = False
 
-            if not self.virtual_pinning:
+            if self.virtual_pinning:
                 return ops_list
 
             chain = []
