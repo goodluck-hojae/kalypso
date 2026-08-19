@@ -1,7 +1,6 @@
 import json
 
 from vllm.entrypoints.openai.protocol import CompletionRequest, ChatCompletionRequest
-from vllm.entrypoints.openai.api_server import create_completion
 from fastapi import Request
 
 
@@ -33,6 +32,9 @@ def build_completion_request(prompt, max_tokens, pin=False):
 #     )
 
 async def completion_call_internal(raw_request: Request, prompt, max_tokens, pin=False):
+    # Import lazily to avoid a cycle while api_server imports Kalypso.
+    from vllm.entrypoints.openai.api_server import create_completion
+
     req = build_completion_request(prompt, max_tokens, pin=pin)
 
     gen = await create_completion(
