@@ -207,7 +207,7 @@ class ICPFilter(BaseOp):
             return 1
         return self.oracle_filter.estimate_tokens(ctx)
 
-    async def __call__(self, ctx: SemContext, priority: int = 0):
+    async def _run_single(self, ctx: SemContext, priority: int = 0):
         score = ctx.state.helper_score
         if score is None:
             raise ValueError("ICPFilter expected helper_score on context state.")
@@ -241,6 +241,38 @@ class ICPFilter(BaseOp):
             }
         })
         return await self.handle_output(ctx, passed)
+
+    async def _run_blocking(self, ctxs: List[SemContext]) -> List[SemContext]:
+        parent = self
+
+        def build_task(ctx: SemContext):
+            class ICPFilterTask:
+                def __init__(self):
+                    self.budget = (
+                        parent.estimate_tokens(ctx)
+                        * KVMemoryManager.get_instance().bytes_per_token
+                    )
+
+                async def __call__(self):
+                    passed = await parent._run_single(ctx)
+                    return ctx if passed else None
+
+            return ICPFilterTask()
+
+        results = await BlockingExecutor.execute_tasks(
+            seeds=ctxs,
+            task_builder=build_task,
+        )
+        return [ctx for ctx in results if ctx is not None]
+
+    async def __call__(
+        self,
+        ctx: SemContext | List[SemContext],
+        priority: int = 0,
+    ):
+        if isinstance(ctx, list):
+            return await self._run_blocking(ctx)
+        return await self._run_single(ctx, priority=priority)
 
 
 class CascadeOperator(BaseOp):
@@ -471,7 +503,7 @@ class CascadeOperator(BaseOp):
             return False, true_prob
         return None, true_prob
 
-    async def __call__(self, ctx: SemContext, priority: int = 0):
+    async def _run_single(self, ctx: SemContext, priority: int = 0):
         _, prompt = self._build_prompts(ctx)
         output_text, helper_probs = await asyncio.to_thread(self._call_vllm, prompt)
         verdict = output_text.strip().lower()
@@ -516,3 +548,35 @@ class CascadeOperator(BaseOp):
         })
 
         return await self.handle_output(ctx, passed)
+
+    async def _run_blocking(self, ctxs: List[SemContext]) -> List[SemContext]:
+        parent = self
+
+        def build_task(ctx: SemContext):
+            class CascadeTask:
+                def __init__(self):
+                    self.budget = (
+                        parent.estimate_tokens(ctx)
+                        * KVMemoryManager.get_instance().bytes_per_token
+                    )
+
+                async def __call__(self):
+                    passed = await parent._run_single(ctx)
+                    return ctx if passed else None
+
+            return CascadeTask()
+
+        results = await BlockingExecutor.execute_tasks(
+            seeds=ctxs,
+            task_builder=build_task,
+        )
+        return [ctx for ctx in results if ctx is not None]
+
+    async def __call__(
+        self,
+        ctx: SemContext | List[SemContext],
+        priority: int = 0,
+    ):
+        if isinstance(ctx, list):
+            return await self._run_blocking(ctx)
+        return await self._run_single(ctx, priority=priority)
