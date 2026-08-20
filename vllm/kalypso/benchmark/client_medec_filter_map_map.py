@@ -69,9 +69,10 @@ def _check_cascade_server(api_base: str):
 
 
 class SemanticQueryBuilder:
-    def __init__(self, data_path: str, model_name: str | None = None):
+    def __init__(self, data_path: str, model_name: str | None = None, blocking: bool = False):
         self.data_path = data_path
         self.model_name = model_name
+        self.blocking = blocking
         self.plan = []
 
     def sem_filter(
@@ -129,6 +130,7 @@ class SemanticQueryBuilder:
         payload = {
             "data_path": self.data_path,
             "ops": self.plan,
+            "blocking": self.blocking,
         }
         if self.model_name is not None:
             payload["model_name"] = self.model_name
@@ -152,14 +154,14 @@ class SemanticQueryBuilder:
         return response.json(), elapsed
 
 
-if __name__ == "__main__":
+def main(*, blocking: bool = False):
     model_name, endpoint = parse_query_args()
 
     medec_csv = os.environ.get("MEDEC_CSV", str(DEFAULT_MEDEC_CSV))
     filter_only = os.environ.get("MEDEC_FILTER_ONLY", "0") == "1"
 
     query = (
-        SemanticQueryBuilder(medec_csv, model_name=model_name)
+        SemanticQueryBuilder(medec_csv, model_name=model_name, blocking=blocking)
         .sem_filter(
             scenarios.MEDEC_ERROR_FILTER,
         )
@@ -172,3 +174,7 @@ if __name__ == "__main__":
     print("\nResponse Summary:")
     print(json.dumps(_response_summary(result), indent=2))
     print(f"\nTotal request time: {latency:.3f} seconds")
+
+
+if __name__ == "__main__":
+    main()

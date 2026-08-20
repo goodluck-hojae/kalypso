@@ -55,9 +55,10 @@ def request_timer(label: str, interval_seconds: int = TIMER_INTERVAL_SECONDS):
 
 
 class SemanticQueryBuilder:
-    def __init__(self, data_path: str, model_name: str | None = None):
+    def __init__(self, data_path: str, model_name: str | None = None, blocking: bool = False):
         self.data_path = data_path
         self.model_name = model_name
+        self.blocking = blocking
         self.plan = []
 
     def sem_map(self, prompt: str):
@@ -115,6 +116,7 @@ class SemanticQueryBuilder:
         payload = {
             "data_path": self.data_path,
             "ops": self.plan,
+            "blocking": self.blocking,
         }
         if self.model_name is not None:
             payload["model_name"] = self.model_name
@@ -144,7 +146,7 @@ class SemanticQueryBuilder:
         return response.json(), elapsed
 
 
-if __name__ == "__main__":
+def main(*, blocking: bool = False):
     model_name, endpoint = parse_query_args()
 
     article_dir = os.environ.get("BIODEX_ARTICLE_DIR", str(DEFAULT_ARTICLE_DIR))
@@ -171,7 +173,7 @@ if __name__ == "__main__":
     )
 
     query = (
-        SemanticQueryBuilder(article_dir, model_name=model_name)
+        SemanticQueryBuilder(article_dir, model_name=model_name, blocking=blocking)
         .sem_map(scenarios.BIODEX_MAP_REACTIONS)
         .cartesian_product(
             reaction_dir,
@@ -192,3 +194,7 @@ if __name__ == "__main__":
     print("\nResponse Summary:")
     print(json.dumps(_response_summary(result), indent=2))
     print(f"\nTotal request time: {latency:.3f} seconds")
+
+
+if __name__ == "__main__":
+    main()

@@ -247,7 +247,7 @@ class IndexedSearch(BaseOp):
             ),
         )
 
-    async def __call__(self, ctx, priority: int = 0):
+    async def _run_single(self, ctx, priority: int = 0):
         query_data = self._query_text_from_data(ctx.input.data)
         ranked_rows = await asyncio.to_thread(
             self._query_retrieval,
@@ -277,3 +277,33 @@ class IndexedSearch(BaseOp):
         })
 
         return ctx
+
+    async def _run_blocking(self, ctxs: List[SemContext]) -> List[SemContext]:
+        parent = self
+
+        def build_task(ctx: SemContext):
+            class IndexedSearchTask:
+                def __init__(self):
+                    self.budget = (
+                        parent.estimate_tokens(ctx)
+                        * KVMemoryManager.get_instance().bytes_per_token
+                    )
+
+                async def __call__(self):
+                    return await parent._run_single(ctx)
+
+            return IndexedSearchTask()
+
+        return await BlockingExecutor.execute_tasks(
+            seeds=ctxs,
+            task_builder=build_task,
+        )
+
+    async def __call__(
+        self,
+        ctx: SemContext | List[SemContext],
+        priority: int = 0,
+    ):
+        if isinstance(ctx, list):
+            return await self._run_blocking(ctx)
+        return await self._run_single(ctx, priority=priority)
