@@ -108,6 +108,9 @@ class AsyncPipelineExecutor:
     LOG_SCHEDULER_INTERVAL_SEC = 1.0
     LOG_RETRY_TRACE = False
     LOG_DEFERRAL_TRACE = False
+    # Pipeline-only ablation: submit every ready task directly to vLLM and let
+    # vLLM perform its own queueing, preemption, and KV-cache management.
+    MEMORY_ADMISSION_CONTROL = True
 
     def __init__(self):
         self.manager = KVMemoryManager.get_instance()
@@ -205,6 +208,9 @@ class AsyncPipelineExecutor:
             return any(stage.has_waiting_tasks() for stage in stages)
 
         async def rebalance_stage_capacity():
+            if not self.MEMORY_ADMISSION_CONTROL:
+                return
+
             changed = False
 
             for stage in stages:
@@ -320,8 +326,11 @@ class AsyncPipelineExecutor:
                         break
 
                     # refresh_retry_max_tokens(stage, task)
-                    if await stage.accept(task, self.manager) is None:
-                        break
+                    if self.MEMORY_ADMISSION_CONTROL:
+                        if await stage.accept(task, self.manager) is None:
+                            break
+                    else:
+                        stage.accept_unconditionally(task)
 
                     record_input(stage.stage_id)
                     stage.pop_task()
@@ -523,6 +532,9 @@ class AsyncPipelineExecutor:
 
 
 class BlockingExecutor:
+    # Blocking/no-admission ablation: retain the fixed worker concurrency while
+    # bypassing Kalypso's KV-memory budget checks.
+    MEMORY_ADMISSION_CONTROL = True
 
     @staticmethod
     async def execute_tasks(
@@ -543,9 +555,10 @@ class BlockingExecutor:
                     out = await task()
                     results.append(out)
                 finally:
-                    async with capacity_cond:
-                        await manager.release(task.budget)
-                        capacity_cond.notify_all()
+                    if BlockingExecutor.MEMORY_ADMISSION_CONTROL:
+                        async with capacity_cond:
+                            await manager.release(task.budget)
+                            capacity_cond.notify_all()
                     queue.task_done()
 
         workers = [
@@ -556,10 +569,11 @@ class BlockingExecutor:
         for seed in seeds:
             task = task_builder(seed)
 
-            async with capacity_cond:
-                while not await manager.can_admit(task.budget):
-                    await capacity_cond.wait()
-                await manager.allocate(task.budget)
+            if BlockingExecutor.MEMORY_ADMISSION_CONTROL:
+                async with capacity_cond:
+                    while not await manager.can_admit(task.budget):
+                        await capacity_cond.wait()
+                    await manager.allocate(task.budget)
 
             await queue.put(task)
 

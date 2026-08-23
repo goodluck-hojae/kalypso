@@ -150,6 +150,13 @@ class Stage:
         self.running_tasks[task.task_id] = budget
         return budget
 
+    def accept_unconditionally(self, task: Task) -> int:
+        # Accept a task without estimating or reserving KV-cache memory. This is for evaluation
+        reserved_budget = 0
+        task.reserved_budget = 0
+        self.running_tasks[task.task_id] = reserved_budget
+        return reserved_budget
+
     def detach_budget(self, task: Task) -> int:
         return self.running_tasks.pop(task.task_id, 0)
 

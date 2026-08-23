@@ -25,6 +25,20 @@ class QueryProcessor:
         # The histogram count is the number of observed block evictions.
         "evicted_blocks": "vllm:kv_block_lifetime_seconds_count",
     }
+    _LLM_WORK_METRICS = {
+        # Histogram sums aggregate the completed requests belonging to the
+        # semantic query. Prompt tokens are the full logical prompt lengths;
+        # prefill tokens computed exclude tokens served from the prefix cache.
+        "prompt_tokens": "vllm:request_prompt_tokens_sum",
+        "prefill_tokens_computed": (
+            "vllm:request_prefill_kv_computed_tokens_sum"
+        ),
+        "decode_tokens": "vllm:generation_tokens_total",
+        "prefill_time_seconds": "vllm:request_prefill_time_seconds_sum",
+        "decode_time_seconds": "vllm:request_decode_time_seconds_sum",
+        "inference_time_seconds": "vllm:request_inference_time_seconds_sum",
+        "preemptions": "vllm:num_preemptions_total",
+    }
 
     def __init__(
         self,
@@ -45,13 +59,13 @@ class QueryProcessor:
 
     @classmethod
     def _kv_metric_snapshot(cls) -> dict[str, float]:
-        """Read process-wide cumulative vLLM KV metrics.
+        """Read process-wide cumulative vLLM KV and execution metrics.
 
         Prefix query/hit counters are token counts. Evictions are exact when
         vLLM is started with ``--kv-cache-metrics-sample 1.0``; otherwise the
         histogram count is only the sampled number of evictions.
         """
-        wanted = set(cls._KV_METRICS.values())
+        wanted = set(cls._KV_METRICS.values()) | set(cls._LLM_WORK_METRICS.values())
         totals = {name: 0.0 for name in wanted}
         found = set()
         for metric in REGISTRY.collect():
@@ -59,12 +73,15 @@ class QueryProcessor:
                 if sample.name in wanted:
                     found.add(sample.name)
                     totals[sample.name] += float(sample.value)
-        snapshot = {
-            key: totals[name]
-            for key, name in cls._KV_METRICS.items()
-        }
+        snapshot = {key: totals[name] for key, name in cls._KV_METRICS.items()}
         snapshot["eviction_metric_available"] = float(
             cls._KV_METRICS["evicted_blocks"] in found
+        )
+        snapshot.update(
+            {key: totals[name] for key, name in cls._LLM_WORK_METRICS.items()}
+        )
+        snapshot["llm_work_metrics_available"] = float(
+            all(name in found for name in cls._LLM_WORK_METRICS.values())
         )
         return snapshot
 
@@ -75,6 +92,22 @@ class QueryProcessor:
         queried = max(0, round(after["prefix_queries"] - before["prefix_queries"]))
         reused = max(0, round(after["prefix_hits"] - before["prefix_hits"]))
         evicted = max(0, round(after["evicted_blocks"] - before["evicted_blocks"]))
+        prompt_tokens = max(0, round(after["prompt_tokens"] - before["prompt_tokens"]))
+        prefill_tokens_computed = max(
+            0,
+            round(
+                after["prefill_tokens_computed"]
+                - before["prefill_tokens_computed"]
+            ),
+        )
+        decode_tokens = max(
+            0,
+            round(after["decode_tokens"] - before["decode_tokens"]),
+        )
+        preemptions = max(
+            0,
+            round(after["preemptions"] - before["preemptions"]),
+        )
         return {
             "prefix_tokens_queried": queried,
             "prefix_tokens_reused": reused,
@@ -87,6 +120,26 @@ class QueryProcessor:
             # from tokens recomputed after an earlier eviction without keeping
             # extra history in the core.
             "prefix_tokens_computed_on_miss": max(0, queried - reused),
+            "prompt_tokens": prompt_tokens,
+            "prefill_tokens_computed": prefill_tokens_computed,
+            "decode_tokens": decode_tokens,
+            "prefill_time_seconds": max(
+                0.0,
+                after["prefill_time_seconds"] - before["prefill_time_seconds"],
+            ),
+            "decode_time_seconds": max(
+                0.0,
+                after["decode_time_seconds"] - before["decode_time_seconds"],
+            ),
+            "inference_time_seconds": max(
+                0.0,
+                after["inference_time_seconds"]
+                - before["inference_time_seconds"],
+            ),
+            "preemptions": preemptions,
+            "llm_work_metrics_available": bool(
+                after.get("llm_work_metrics_available", 0.0)
+            ),
         }
 
 
