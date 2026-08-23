@@ -22,7 +22,37 @@ class PlanExecutor:
 
             # BLOCKING
             if isinstance(item, ops.BaseOp) and item.behavior == OpBehavior.BLOCKING:
-                ctxs = await item(ctxs)
+                operator_name = item.__class__.__name__
+                input_count = len(ctxs)
+                started_at = time.perf_counter()
+                print(
+                    "[blocking-operator] start "
+                    f"operator={operator_name} "
+                    f"position={item.position} "
+                    f"input_tuples={input_count}"
+                )
+                try:
+                    ctxs = await item(ctxs)
+                except Exception as exc:
+                    elapsed = time.perf_counter() - started_at
+                    print(
+                        "[blocking-operator] failed "
+                        f"operator={operator_name} "
+                        f"position={item.position} "
+                        f"input_tuples={input_count} "
+                        f"elapsed_seconds={elapsed:.3f} "
+                        f"error={type(exc).__name__}"
+                    )
+                    raise
+                elapsed = time.perf_counter() - started_at
+                print(
+                    "[blocking-operator] done "
+                    f"operator={operator_name} "
+                    f"position={item.position} "
+                    f"input_tuples={input_count} "
+                    f"output_tuples={len(ctxs)} "
+                    f"elapsed_seconds={elapsed:.3f}"
+                )
 
             elif isinstance(item, ops.BaseOp) and item.behavior == OpBehavior.JOIN:
                 next_ctxs = []
