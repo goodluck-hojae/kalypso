@@ -1,7 +1,6 @@
 import argparse
 import os
 import re
-import sys
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -10,6 +9,8 @@ import numpy as np
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+
+from vllm.kalypso.icp.colbert_wiki import ColbertWiki
 
 
 def _normalize_tuple(values: list[Any] | tuple[Any, ...]) -> tuple[Any, ...]:
@@ -253,18 +254,12 @@ class VectorDBService:
 class ColBERTVectorDBService:
     def __init__(
         self,
-        colbert_wiki_path: str,
         index_name: str,
         experiment_root: str,
         experiment: str,
         collection: str,
         colbert_root: str,
     ):
-        if colbert_wiki_path not in sys.path:
-            sys.path.insert(0, colbert_wiki_path)
-
-        from ColbertWiki import ColbertWiki
-
         self.index_name = index_name
         self.wiki = ColbertWiki(
             index_name=index_name,
@@ -339,7 +334,6 @@ class ClearRequest(BaseModel):
 async def lifespan(app: FastAPI):
     if app.state.backend == "colbert":
         app.state.vector_db = ColBERTVectorDBService(
-            colbert_wiki_path=app.state.colbert_wiki_path,
             index_name=app.state.colbert_index_name,
             experiment_root=app.state.colbert_experiment_root,
             experiment=app.state.colbert_experiment,
@@ -356,7 +350,6 @@ async def lifespan(app: FastAPI):
 def create_app(
     model_name: str = "intfloat/e5-base-v2",
     backend: str = "faiss",
-    colbert_wiki_path: str = "/home/hojaeson_umass/projects/semops-experiments/pipelines/lotus",
     colbert_index_name: str = "fever_factool_wikipedia_colbert",
     colbert_experiment_root: str = "/home/hojaeson_umass/projects/semops-experiments/pipelines/lotus/logs/colbert_indexes",
     colbert_experiment: str = "wikipedia",
@@ -366,7 +359,6 @@ def create_app(
     app = FastAPI(lifespan=lifespan)
     app.state.model_name = model_name
     app.state.backend = backend
-    app.state.colbert_wiki_path = colbert_wiki_path
     app.state.colbert_index_name = colbert_index_name
     app.state.colbert_experiment_root = colbert_experiment_root
     app.state.colbert_experiment = colbert_experiment
@@ -430,10 +422,6 @@ def main():
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--model-name", default="intfloat/e5-base-v2")
     parser.add_argument("--backend", choices=("faiss", "colbert"), default="faiss")
-    parser.add_argument(
-        "--colbert-wiki-path",
-        default="/home/hojaeson_umass/projects/semops-experiments/pipelines/lotus",
-    )
     parser.add_argument("--colbert-index-name", default="fever_factool_wikipedia_colbert")
     parser.add_argument(
         "--colbert-experiment-root",
@@ -453,7 +441,6 @@ def main():
     app = create_app(
         model_name=args.model_name,
         backend=args.backend,
-        colbert_wiki_path=args.colbert_wiki_path,
         colbert_index_name=args.colbert_index_name,
         colbert_experiment_root=args.colbert_experiment_root,
         colbert_experiment=args.colbert_experiment,
