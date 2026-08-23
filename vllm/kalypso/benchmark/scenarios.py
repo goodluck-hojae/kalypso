@@ -118,6 +118,18 @@ CONTRACT_NLI_EXPLAIN_ENTAILMENT = (
     "obligation or clause in one concise sentence. Do not add filler, repeated "
     "punctuation, or repeated characters."
 )
+CONTRACT_NLI_CATEGORY_JOIN = (
+    "Does this contract-hypothesis entailment and its explanation concern the "
+    "given confidentiality-obligation category? Answer true or false."
+)
+CONTRACT_NLI_TOPK_EVIDENCE = (
+    "Which document presents stronger and more explicit contractual evidence "
+    "for its stated confidentiality obligation? Answer Document A or Document B."
+)
+CONTRACT_NLI_SUMMARIZE_TOP_EVIDENCE = (
+    "Summarize this selected confidentiality obligation and its supporting "
+    "contract language in one concise sentence."
+)
 
 
 # MEDEC medical error detection and correction

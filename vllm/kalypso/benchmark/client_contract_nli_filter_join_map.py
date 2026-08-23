@@ -86,6 +86,18 @@ class SemanticQueryBuilder:
         )
         return self
 
+    def sem_topk(self, instruction: str, k: int):
+        self.plan.append(
+            {
+                "op": "sem_topk",
+                "args": {
+                    "instruction": instruction,
+                    "k": k,
+                },
+            }
+        )
+        return self
+
     def build(self) -> dict:
         payload = {
             "data_path": self.data_path,
