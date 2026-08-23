@@ -64,6 +64,12 @@ ColBERT backend:
 python vllm/kalypso/icp/vector_service.py --backend colbert
 ```
 
+The ColBERT service wrapper is included in
+`vllm/kalypso/icp/colbert_wiki.py`. A ColBERT installation, prebuilt index,
+and matching TSV collection are still required. For paths other than the
+development defaults, pass `--colbert-root`, `--colbert-experiment-root`,
+`--colbert-experiment`, `--colbert-index-name`, and `--colbert-collection`.
+
 #### Cascade Model
 
 Cascade/proxy filtering should use a separate vLLM proxy service. 
