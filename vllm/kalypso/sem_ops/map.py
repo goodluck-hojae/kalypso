@@ -62,8 +62,7 @@ class SemMap(BaseOp):
             prompt_token_len = KVMemoryManager.get_instance().token_length(prompt_str)
 
         ratio = MapRatioEstimator.instance().get_ratio(self.position)
-        planned = int(ratio * prompt_token_len) if ratio else int(prompt_token_len)  #1
-        return min(planned, SemMap.MAX_TOKEN_LIMIT)
+        return int(ratio * prompt_token_len) if ratio else int(prompt_token_len)  #1
 
     def _build_prompt(self, ctx):
         return get_prompt(self.instruction, ctx.input.data, op=OpName.SEM_MAP)
