@@ -617,19 +617,88 @@ async def unpin_pinned_requests(
 
 from vllm.kalypso import query_processor, query, interface
 from vllm.kalypso.pin_registry import PinnedRequestRegistry
+def _materialize_records_to_csv(records: list, text_column: str | None = None) -> str:
+    """Writes inline records to a temp CSV so the existing path-based data
+    readers (vllm.kalypso.data.data._csv_reader) can consume them unchanged,
+    columns intact — that reader picks the row's text from a "data" column,
+    a "Text"/"Sentences" pair, a plain "Text" column, or else joins every
+    column, in that order, so preserving columns keeps all of those working.
+    A plain cell value (str/int/float, no column name) is treated as a
+    {"data": value} row. Records must be all row objects or all bare cells,
+    never mixed — the reader picks the "data" column whenever it's merely
+    *present* in the row (not merely non-empty), so a mixed list would give
+    every dict row an empty "data" cell and incorrectly read as blank
+    instead of falling through to its real Text/Sentences columns.
+
+    text_column picks which of a row object's columns is the text to run ops
+    over, instead of relying on that fixed guessing order — its value is
+    copied into a "data" column (which the reader always tries first), the
+    original columns kept alongside for ops that reference them by name."""
+    import csv
+    import tempfile
+
+    is_dict_row = [isinstance(record, dict) for record in records]
+    if any(is_dict_row) and not all(is_dict_row):
+        raise HTTPException(
+            status_code=400,
+            detail="records must be all row objects or all plain values, not a mix of both.",
+        )
+
+    if not all(is_dict_row):
+        if text_column is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="text_column requires row-object records, not plain values.",
+            )
+        records = [{"data": str(record)} for record in records]
+    elif text_column is not None:
+        missing = [i for i, record in enumerate(records) if text_column not in record]
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=f'text_column "{text_column}" missing from record(s) at index {missing[:5]}.',
+            )
+        records = [{**record, "data": record[text_column]} for record in records]
+
+    fieldnames: list[str] = []
+    for record in records:
+        for key in record:
+            if key not in fieldnames:
+                fieldnames.append(key)
+    if not fieldnames:
+        fieldnames = ["data"]
+
+    fd, path = tempfile.mkstemp(prefix="kalypso_records_", suffix=".csv")
+    with os.fdopen(fd, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore", restval="")
+        writer.writeheader()
+        writer.writerows(records)
+    return path
+
+
 @router.post("/v1/semantic/query")
 async def semantic_query(
     sem_request: interface.SemanticQueryRequest,
     raw_request: Request,
 ):
+    if bool(sem_request.data_path) == bool(sem_request.records):
+        raise HTTPException(
+            status_code=400,
+            detail="Exactly one of data_path or records must be provided.",
+        )
+
+    data_path = sem_request.data_path or _materialize_records_to_csv(
+        sem_request.records, sem_request.text_column
+    )
+
     started = asyncio.get_running_loop().time()
     print("=== Semantic Execute Request ===")
     print("Query:")
     print(sem_request.ops)
     print("data_path:")
-    print(sem_request.data_path)
+    print(data_path)
     print("================================")
-    _query = query.Query(sem_request.ops, sem_request.data_path)
+    _query = query.Query(sem_request.ops, data_path)
     print('query called')
 
     processor = raw_request.app.state.query_processor
