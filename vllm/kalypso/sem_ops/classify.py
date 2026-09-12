@@ -78,7 +78,7 @@ class SemClassify(BaseOp):
                 pin=False,
                 priority=priority,
         )
-        group_output = output.text.strip().lower()
+        group_output = (output.text or "").strip().lower()
         group = ""
         for g in self.classes:
             if g.lower() in group_output:
