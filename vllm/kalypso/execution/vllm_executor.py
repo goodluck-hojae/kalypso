@@ -37,6 +37,7 @@ class VLLMExecutor(LLMExecutor):
             repetition_penalty=1.3,
             priority=priority,
             vllm_xargs={"pinned": pin},
+            chat_template_kwargs={"enable_thinking": False},
         )
 
 
