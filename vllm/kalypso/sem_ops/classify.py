@@ -35,7 +35,7 @@ class SemClassify(BaseOp):
         self.classes = list(classes)
         self.pin = pin
         self.unpin = unpin
-        self.max_tokens = max(KVMemoryManager.get_instance().token_length(g) for g in self.classes) + 1
+        self.max_tokens = max(KVMemoryManager.get_instance().token_length(g) for g in self.classes) + 8
 
         self.instruction = "\n\n" \
                 + "Choose exactly one class from the list below.\n" \
