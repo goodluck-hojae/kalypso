@@ -635,7 +635,10 @@ def _materialize_records_to_csv(records: list, text_column: str | None = None) -
     copied into a "data" column (which the reader always tries first), the
     original columns kept alongside for ops that reference them by name."""
     import csv
+    import os
     import tempfile
+
+    from fastapi import HTTPException
 
     is_dict_row = [isinstance(record, dict) for record in records]
     if any(is_dict_row) and not all(is_dict_row):
@@ -681,6 +684,8 @@ async def semantic_query(
     sem_request: interface.SemanticQueryRequest,
     raw_request: Request,
 ):
+    from fastapi import HTTPException
+
     if bool(sem_request.data_path) == bool(sem_request.records):
         raise HTTPException(
             status_code=400,
