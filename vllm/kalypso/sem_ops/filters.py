@@ -90,8 +90,8 @@ class SemFilter(BaseOp):
             ctx.state.pin_req_id = output.request_id
 
         # appended_prompt, appended_prompt_str = add_assistant_prompt(prompt, output.text)
-        verdict = output.text.strip().lower()
-        
+        verdict = (output.text or "").strip().lower()
+
         ctx.input.data = prompt[:-1]
         
         if bool(ctx.input.right_data):
@@ -452,7 +452,7 @@ class CascadeOperator(BaseOp):
         )
         if self.pin:
             ctx.state.pin_req_id = output.request_id
-        return output.text.strip().lower(), "main"
+        return (output.text or "").strip().lower(), "main"
 
     def _resolve_with_thresholds(self, helper_probs):
         if self.low_threshold is None or self.high_threshold is None:

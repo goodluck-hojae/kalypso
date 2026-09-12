@@ -11,17 +11,31 @@ def compute_bytes_per_token(
     dtype: torch.dtype = torch.float16,
 ) -> int:
     cfg = AutoConfig.from_pretrained(model_name)
+    # Multimodal / nested configs (e.g. Qwen3.5) keep the language-model
+    # fields under a sub-config instead of the top level.
+    text_cfg = cfg.get_text_config() if hasattr(cfg, "get_text_config") else cfg
 
-    num_layers = cfg.num_hidden_layers
+    num_layers = text_cfg.num_hidden_layers
+
+    # Hybrid linear/full attention models (e.g. Qwen3.5, Qwen3-Next) only
+    # keep a growing per-token KV cache for their full-attention layers;
+    # linear-attention layers use a fixed-size recurrent state instead.
+    layer_types = getattr(text_cfg, "layer_types", None)
+    if layer_types is not None:
+        num_layers = sum(1 for lt in layer_types if lt == "full_attention")
 
     # GQA / MQA aware
     num_kv_heads = getattr(
-        cfg,
+        text_cfg,
         "num_key_value_heads",
-        cfg.num_attention_heads,
+        text_cfg.num_attention_heads,
     )
 
-    head_dim = cfg.hidden_size // cfg.num_attention_heads
+    head_dim = getattr(
+        text_cfg,
+        "head_dim",
+        text_cfg.hidden_size // text_cfg.num_attention_heads,
+    )
 
     dtype_bytes = {
         torch.float16: 2,
@@ -30,7 +44,7 @@ def compute_bytes_per_token(
     }[dtype]
 
     return (
-        2 *                 
+        2 *
         num_layers *
         num_kv_heads *
         head_dim *

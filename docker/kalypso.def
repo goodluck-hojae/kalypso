@@ -1,0 +1,44 @@
+Bootstrap: docker
+From: vllm/vllm-openai:v0.29.0
+
+%setup
+    set -eu
+    # Cluster APPTAINER_BINDPATH destinations must exist before entering %post.
+    for mount_dir in work nese project gypsum scratch modules nas datasets scratch4 scratch3 rstor; do
+        mkdir -p "${APPTAINER_ROOTFS:?}/${mount_dir}"
+    done
+
+%files
+    vllm/kalypso /opt/kalypso-source/vllm/kalypso
+    vllm/entrypoints/openai/api_server.py /opt/kalypso-source/vllm/entrypoints/openai/api_server.py
+    docker/kalypso /opt/kalypso-source/docker/kalypso
+
+%post
+    set -eu
+    python3 -c "from importlib.metadata import version; assert version('vllm').split('+')[0] == '0.29.0', version('vllm')"
+    python3 /opt/kalypso-source/docker/kalypso/prepare.py \
+        --source /opt/kalypso-source \
+        --target "$(python3 -c 'import importlib.util; print(next(iter(importlib.util.find_spec("vllm").submodule_search_locations)))')"
+    python3 -c "import compileall, importlib.util; assert compileall.compile_dir(next(iter(importlib.util.find_spec('vllm').submodule_search_locations)) + '/kalypso', quiet=1)"
+    mkdir -p /data /cache
+    rm -rf /opt/kalypso-source
+
+%environment
+    export HF_HOME=/cache/huggingface
+    export XDG_CACHE_HOME=/cache
+    export VLLM_CACHE_ROOT=/cache/vllm
+
+%runscript
+    exec python3 -m vllm.entrypoints.cli.main serve "$@"
+
+%test
+    python3 -c "from importlib.metadata import version; assert version('vllm').split('+')[0] == '0.29.0'"
+
+%labels
+    org.opencontainers.image.title Kalypso
+    ai.kalypso.vllm.version 0.29.0
+
+%help
+    Kalypso port candidate on vLLM 0.29.0. Build on ARM64 for GH200.
+    Run with --nv and writable /cache and dataset /data bind mounts.
+    Qwen hybrid-cache compatibility is unfinished; see docker/kalypso/README.md.

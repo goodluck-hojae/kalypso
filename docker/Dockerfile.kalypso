@@ -1,0 +1,23 @@
+FROM vllm/vllm-openai:v0.29.0
+
+COPY vllm/kalypso /opt/kalypso-source/vllm/kalypso
+COPY vllm/entrypoints/openai/api_server.py /opt/kalypso-source/vllm/entrypoints/openai/api_server.py
+COPY docker/kalypso /opt/kalypso-source/docker/kalypso
+
+RUN set -eu; \
+    python3 -c "from importlib.metadata import version; assert version('vllm').split('+')[0] == '0.29.0', version('vllm')"; \
+    python3 /opt/kalypso-source/docker/kalypso/prepare.py \
+        --source /opt/kalypso-source \
+        --target "$(python3 -c 'import importlib.util; print(next(iter(importlib.util.find_spec("vllm").submodule_search_locations)))')"; \
+    python3 -c "import compileall, importlib.util; assert compileall.compile_dir(next(iter(importlib.util.find_spec('vllm').submodule_search_locations)) + '/kalypso', quiet=1)"; \
+    mkdir -p /data /cache; \
+    rm -rf /opt/kalypso-source
+
+ENV HF_HOME=/cache/huggingface
+ENV XDG_CACHE_HOME=/cache
+ENV VLLM_CACHE_ROOT=/cache/vllm
+
+LABEL org.opencontainers.image.title="Kalypso"
+LABEL ai.kalypso.vllm.version="0.29.0"
+
+ENTRYPOINT ["python3", "-m", "vllm.entrypoints.cli.main", "serve"]

@@ -1491,7 +1491,7 @@ async def init_app_state(
     tp_size = (
         state.engine_client.vllm_config.parallel_config.tensor_parallel_size
     )
-    budget = per_gpu_budget * tp_size
+    budget = per_gpu_budget * tp_size * 0.5
     gib = 1024**3
     logger.info(
         "Semantic Query processor KV budget: per_gpu=%.2f GiB tp_size=%s total=%.2f GiB",

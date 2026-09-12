@@ -78,6 +78,7 @@ class SemanticQueryBuilder:
         self,
         prompt: str,
         *,
+        max_tokens: int = 8,
         cascade: bool = False,
         cascade_model: str | None = None,
         cascade_api_base: str | None = None,
@@ -87,6 +88,7 @@ class SemanticQueryBuilder:
     ):
         args = {
             "prompt": prompt,
+            "max_tokens": max_tokens,
         }
         if cascade:
             args.update({
@@ -162,6 +164,7 @@ if __name__ == "__main__":
         SemanticQueryBuilder(medec_csv, model_name=model_name)
         .sem_filter(
             scenarios.MEDEC_ERROR_FILTER,
+            max_tokens=128,
         )
         .sem_map(scenarios.MEDEC_ERROR_SENTENCE_ID_MAP)
         .sem_map(scenarios.MEDEC_CORRECTED_SENTENCE_MAP)

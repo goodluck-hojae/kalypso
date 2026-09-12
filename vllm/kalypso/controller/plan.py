@@ -211,7 +211,7 @@ class SemanticPlan:
                 op.pin = False
                 op.unpin = False
 
-            if not self.virtual_pinning:
+            if self.virtual_pinning:
                 return ops_list
 
             chain = []
@@ -284,6 +284,7 @@ class SemanticPlan:
                     physical.append(
                         ops.SemFilter(
                             instruction=args["prompt"],
+                            max_tokens=args.get("max_tokens", 8),
                             position=idx
                         )
                     )
