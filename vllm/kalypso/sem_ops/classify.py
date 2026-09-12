@@ -46,7 +46,7 @@ class SemClassify(BaseOp):
 
     def _build_prompts(self, ctx):
         data_prompt = ctx.input.data if 'system' in ctx.input.data[0]['role'] else get_system_prompt() + ctx.input.data
-        full_prompt = get_prompt(self.instruction, ctx.input.data, op=OpName.SEM_FILTER)
+        full_prompt = get_prompt(self.instruction, ctx.input.data, op=OpName.SEM_CLASSIFY)
         return data_prompt, full_prompt
 
 
