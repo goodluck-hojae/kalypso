@@ -24,7 +24,7 @@ from vllm.kalypso.execution.pipeline_execution import BlockingExecutor
 
 
 class SemAgg(BaseOp):
-    def __init__(self, instruction: str, max_tokens: int = 8192, concurrency: int = 8, position=-1):
+    def __init__(self, instruction: str, max_tokens: int = 512, concurrency: int = 8, position=-1):
         super().__init__(behavior=OpBehavior.BLOCKING, position=position)
         self.instruction = instruction
         self.max_tokens = max_tokens
@@ -166,7 +166,7 @@ class SemTopK(BaseOp):
         
         self.instruction = instruction
         self.k = k
-        self.max_tokens = 5
+        self.max_tokens = 32
         self.concurrency = concurrency
 
     def _ctx_to_text(self, ctx: SemContext) -> str:
