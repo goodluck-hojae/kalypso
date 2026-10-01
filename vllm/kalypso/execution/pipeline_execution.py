@@ -4,7 +4,6 @@ import time
 
 from vllm.kalypso.budget import KVMemoryManager
 from vllm.kalypso.context import RetryTaskResult
-# from vllm.kalypso.controller.map_estimator import MapRatioEstimator
 from vllm.kalypso.controller.stage import Task
 from vllm.kalypso.sem_ops import OpBehavior, ops
 
@@ -90,6 +89,12 @@ class JoinTracker:
         self.reserved_budget = reserved_budget
         self.on_release = on_release
         self.lock = asyncio.Lock()
+
+    async def add_children(self, count: int):
+        # A tracked descendant fanned out: it is replaced by `count` tasks that
+        # each carry this tracker, so the parent stays pinned until all of them finish.
+        async with self.lock:
+            self.pending_children += count
 
     async def child_finished(self):
         async with self.lock:
@@ -223,6 +228,16 @@ class AsyncPipelineExecutor:
             for tracker in task.trackers:
                 await tracker.child_finished()
 
+        async def cancel_active_tasks():
+            # A task failed (e.g. the client disconnected): stop the other
+            # in-flight tasks so none outlive the query's pin cleanup.
+            for future in active:
+                future.cancel()
+            await asyncio.gather(*active, return_exceptions=True)
+            for future, (stage, task) in list(active.items()):
+                await stage.release_budget(stage.detach_budget(task), self.manager)
+            active.clear()
+
         def record_input(stage_id: int):
             if stage_id in stage_stat:
                 stage_stat[stage_id]["input"] += 1
@@ -270,24 +285,12 @@ class AsyncPipelineExecutor:
             for idx in range(1, len(stages)):
                 stage = stages[idx]
                 prev_stage = stages[idx - 1]
-                # downstream_light = (
-                #     stage.running_count() <= 1
-                #     and stage.ready_count() <= stage.low_threshold
-                # )
-                # if not (stage.is_starving() and downstream_light):
-                #     continue
     
                 if not (stage.is_starving()):
                     continue
                 head_task = prev_stage.peek_task()
                 if head_task is None:
                     continue
-
-                # head_budget = prev_stage.estimate_budget(head_task)
-                # used, cap = self.manager.stage_usage(prev_stage.stage_id)
-                # needed = used + head_budget - cap
-                # if needed <= 0:
-                #     continue
 
                 if await self.manager.rebalance_stage_capacity(
                     receiver_id=prev_stage.stage_id,
@@ -320,31 +323,6 @@ class AsyncPipelineExecutor:
                     "head_admissible": admissible,
                 }
             return details
-
-        # def refresh_retry_max_tokens(stage, task):
-        #     retry_position = task.ctx.state.retry_op_position
-        #     if retry_position < 0 or task.op_index >= len(stage.operators):
-        #         return
-        #
-        #     op = stage.operators[task.op_index]
-        #     if not isinstance(op, ops.SemMap) or op.position != retry_position:
-        #         return
-        #
-        #     ratio = MapRatioEstimator.instance().get_ratio(retry_position)
-        #     if ratio is None:
-        #         return
-        #
-        #     prompt = op._build_prompt(task.ctx)
-        #     prompt_str = KVMemoryManager.get_instance().apply_chat_template(prompt)
-        #     prompt_token_len = KVMemoryManager.get_instance().token_length(prompt_str)
-        #     max_tokens = max(
-        #         1,
-        #         min(
-        #             ops.SemMap.MAX_TOKEN_LIMIT,
-        #             math.ceil(ratio * prompt_token_len),
-        #         ),
-        #     )
-        #     task.ctx.state.retry_max_tokens = max_tokens
 
         async def launch_ready_tasks():
             launched = False
@@ -431,6 +409,7 @@ class AsyncPipelineExecutor:
                     log_running_tasks(
                         f"finish task={task.task_id} stage={stage.stage_id}"
                     )
+                    await cancel_active_tasks()
                     raise
 
                 if isinstance(result, RetryTaskResult):
@@ -492,6 +471,11 @@ class AsyncPipelineExecutor:
                         await rebalance_stage_capacity()
                         await finalize_task(task)
                         continue
+
+                    # This task is replaced by its children, which inherit its
+                    # trackers; count them before any child can finalize.
+                    for tracker in task.trackers:
+                        await tracker.add_children(len(child_ctxs) - 1)
 
                     deferred_release = False
                     trackers = task.trackers

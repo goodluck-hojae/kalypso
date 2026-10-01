@@ -7,6 +7,10 @@ from vllm.kalypso.pin_registry import PinnedRequestRegistry
 from .executor import LLMExecutor, CompletionResult
 
 
+class ClientDisconnectedError(RuntimeError):
+    """The semantic query's HTTP client disconnected, so vLLM cancelled the call."""
+
+
 class VLLMExecutor(LLMExecutor):
 
     UNPIN_FUNCTION = 'unpin_request'
@@ -102,6 +106,9 @@ class VLLMExecutor(LLMExecutor):
             f"returned kind=chat "
             f"response_type={type(gen).__name__}"
         )
+        if gen is None:
+            # with_cancellation returns None once raw_request is disconnected.
+            raise ClientDisconnectedError("client disconnected; LLM call cancelled")
 
         raw = gen.body.decode("utf-8")
         data = json.loads(raw)
@@ -159,6 +166,9 @@ class VLLMExecutor(LLMExecutor):
             f"returned kind=completion "
             f"response_type={type(gen).__name__}"
         )
+        if gen is None:
+            # with_cancellation returns None once raw_request is disconnected.
+            raise ClientDisconnectedError("client disconnected; LLM call cancelled")
 
         raw = gen.body.decode("utf-8")
         data = json.loads(raw)

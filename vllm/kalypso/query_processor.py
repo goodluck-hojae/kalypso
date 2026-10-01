@@ -11,6 +11,7 @@ from vllm.kalypso.query import Query
 from vllm.kalypso.controller import SemanticPlan
 from vllm.kalypso.execution.vllm_executor import VLLMExecutor
 from vllm.kalypso.pin_registry import PinnedRequestRegistry
+from vllm.v1.engine.exceptions import EngineDeadError
 
 
 class QueryProcessor:
@@ -203,9 +204,17 @@ class QueryProcessor:
                 self._monitor_stuck_scheduler(engine_client)
             )
 
+    def stop_stuck_monitor(self):
+        if self._stuck_monitor_task is not None and not self._stuck_monitor_task.done():
+            self._stuck_monitor_task.cancel()
+
     async def _monitor_stuck_scheduler(self, engine_client):
         while True:
             await asyncio.sleep(self.STUCK_CHECK_INTERVAL_SEC)
+
+            if engine_client.errored:
+                print("[QueryProcessor] engine is dead; stopping stuck monitor")
+                return
 
             try:
                 scheduler_state = await asyncio.wait_for(
@@ -252,6 +261,9 @@ class QueryProcessor:
                 self._consecutive_stuck_checks = 0
                 self._consecutive_timeout_checks = 0
                 continue
+            except EngineDeadError:
+                print("[QueryProcessor] engine is dead; stopping stuck monitor")
+                return
             except Exception as exc:
                 print(f"[QueryProcessor] stuck monitor failed to query scheduler state: {exc}")
                 continue

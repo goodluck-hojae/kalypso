@@ -137,6 +137,9 @@ async def lifespan(app: FastAPI):
         finally:
             if task is not None:
                 task.cancel()
+            query_processor_ = getattr(app.state, "query_processor", None)
+            if query_processor_ is not None:
+                query_processor_.stop_stuck_monitor()
     finally:
         # Ensure app state including engine ref is gc'd
         del app.state
