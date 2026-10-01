@@ -479,6 +479,8 @@ class AsyncPipelineExecutor:
 
                     deferred_release = False
                     trackers = task.trackers
+                    # The parent's accumulated prompt is a prefix of every child's prompt.
+                    shared_tokens = self.manager.token_length(result.input.data)
                     if task.ctx.state.pin_req_id is not None:
                         add_deferred_parent(stage.stage_id, budget)
                         if self.LOG_DEFERRAL_TRACE:
@@ -501,8 +503,26 @@ class AsyncPipelineExecutor:
                             ),
                         )
                         deferred_release = True
+                    elif budget > 0:
+                        # Virtual pinning: children share the parent's prefix in the
+                        # prefix cache; reserve it once until the last descendant ends.
+                        shared_budget = min(budget, shared_tokens * self.manager.bytes_per_token)
+                        await stage.release_budget(budget - shared_budget, self.manager)
+                        add_deferred_parent(stage.stage_id, shared_budget)
+                        trackers = trackers + (
+                            JoinTracker(
+                                task.ctx,
+                                len(child_ctxs),
+                                manager=self.manager,
+                                stage_id=stage.stage_id,
+                                reserved_budget=shared_budget,
+                                on_release=release_deferred_parent,
+                            ),
+                        )
+                        deferred_release = True
 
                     for child_ctx in child_ctxs:
+                        child_ctx.state.shared_prefix_tokens = shared_tokens
                         child_task = Task(
                             ctx=child_ctx,
                             stage_index=next_stage_index,
