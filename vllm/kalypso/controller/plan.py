@@ -118,9 +118,23 @@ class SemanticPlan:
                     min_fraction=1.0,
                     max_fraction=1.0,
                 )
-            # Start early stages at their minimum admission budget and give the
-            # last stage the remaining capacity, since it is usually the
-            # bottleneck after fanout.
+            
+            
+            # This is for ablation
+            # elif num_stages == 3:
+            #     # Stage 1 / 2 / 3 fractions; keep exactly one line uncommented.
+            #     fixed_fractions = (0.1, 0.3, 0.6)    # most memory to the last stage
+            #     # fixed_fractions = (0.1, 0.45, 0.45)  # stages 2 and 3 balanced
+            #     # fixed_fractions = (0.1, 0.6, 0.3)    # middle stage favored
+            #     # fixed_fractions = (0.2, 0.4, 0.4)    # more for stage 1
+            #     # fixed_fractions = (0.33, 0.33, 0.34) # uniform split
+            #     for sid, fraction in zip(stage_ids, fixed_fractions):
+            #         kv.register_stage(
+            #             sid,
+            #             fraction,
+            #             min_fraction=fraction,
+            #             max_fraction=fraction,
+            #         )
             # elif num_stages == 2:
             #     fixed_fractions = (0.9, 0.1)
             #     for sid, fraction in zip(stage_ids, fixed_fractions):
