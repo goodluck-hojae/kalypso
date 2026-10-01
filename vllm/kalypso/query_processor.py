@@ -45,7 +45,7 @@ class QueryProcessor:
         self,
         model_name,
         budget,
-        virtual_pinning: bool = True,
+        virtual_pinning: bool = False,
         blocking: bool = False,
     ):
         self.model_name = model_name
