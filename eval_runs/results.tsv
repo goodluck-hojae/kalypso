@@ -1,0 +1,2 @@
+job	config	latency_s	calls	prompt_tokens	gen_tokens	preemptions	retries	output_rows	client_log	server_log	finished
+explicit_3s	explicit pinning, 3S	2433.135	-35836	0	0	0	1	27500	/home/hojaeson_umass/projects/semops-experiments/results/2026-10-01_budgetfix_ablations/client/explicit_3s.log	/home/hojaeson_umass/projects/semops-experiments/results/2026-10-01_budgetfix_ablations/server/explicit_3s.log	10-01 18:58
