@@ -208,8 +208,7 @@ class AsyncPipelineExecutor:
             # [sched] 08:03:11 finish task=12 stage=2
             # stage   used/cap GB  wait   run
             #     1   25.7/25.8     325     3  FULL
-            # FULL = has waiting tasks and memory >= 90% used;
-            # SATURATED / STARVING = the stage's rebalancing signals.
+            # FULL = has waiting tasks and memory >= 90% used.
             lines = [
                 f"[sched] {time.strftime('%H:%M:%S')} {event}",
                 f"{'stage':>5} {'used/cap GB':>13} {'wait':>5} {'run':>5}",
@@ -217,16 +216,10 @@ class AsyncPipelineExecutor:
             for stage in stages:
                 used, cap = self.manager.stage_usage(stage.stage_id)
                 wait, run = len(stage.waiting_tasks), len(stage.running_tasks)
-                flags = []
-                if cap > 0 and used >= 0.9 * cap and wait > 0:
-                    flags.append("FULL")
-                if stage.is_saturated():
-                    flags.append("SATURATED")
-                elif stage.is_starving():
-                    flags.append("STARVING")
+                full = "  FULL" if cap > 0 and used >= 0.9 * cap and wait > 0 else ""
                 lines.append(
                     f"{stage.stage_id:>5}   {used / 1e9:5.1f}/{cap / 1e9:<5.1f} "
-                    f"{wait:>5} {run:>5}  {' '.join(flags)}".rstrip()
+                    f"{wait:>5} {run:>5}{full}"
                 )
             print("\n".join(lines))
 
