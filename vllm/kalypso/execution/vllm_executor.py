@@ -38,7 +38,7 @@ class VLLMExecutor(LLMExecutor):
             top_p=1.0,
             frequency_penalty=0.5,
             repetition_penalty=1.3,
-            priority=-1,
+            priority=priority,
             vllm_xargs={"pinned": pin},
         )
 
@@ -53,7 +53,7 @@ class VLLMExecutor(LLMExecutor):
             top_p=1.0,
             frequency_penalty=0.5,
             repetition_penalty=1.3,
-            priority=-1,
+            priority=priority,
             vllm_xargs={"pinned": pin},
         )
 
