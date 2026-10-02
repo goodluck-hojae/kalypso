@@ -60,6 +60,15 @@ class KVMemoryManager:
         self._cond = asyncio.Condition()
 
     # Stage API (Pipeline)
+    def reset_stages(self):
+        """Forget the stages of earlier queries. Called at the start of each query,
+        so stale stages neither hold capacity nor act as donors or receivers."""
+        for d in (
+            self._stage_capacity, self._stage_min_capacity, self._stage_max_capacity,
+            self._stage_used, self._stage_inflight,
+        ):
+            d.clear()
+
     def register_stage(
         self,
         stage_id: int,
@@ -85,13 +94,12 @@ class KVMemoryManager:
         stage_states = []
         for stage_id in sorted(self._stage_capacity):
             stage_states.append(
-                "stage="
-                f"{stage_id} "
-                f"used={int(self._stage_used.get(stage_id, 0)):,} "
-                f"cap={int(self._stage_capacity.get(stage_id, 0)):,} "
-                f"min={int(self._stage_min_capacity.get(stage_id, 0)):,} "
-                f"max={int(self._stage_max_capacity.get(stage_id, 0)):,} "
-                f"inflight={int(self._stage_inflight.get(stage_id, 0))}"
+                f"S{stage_id}: "
+                f"{self._stage_used.get(stage_id, 0) / 1e9:.1f}"
+                f"/{self._stage_capacity.get(stage_id, 0) / 1e9:.1f} GB, "
+                f"min {self._stage_min_capacity.get(stage_id, 0) / 1e9:.1f}, "
+                f"max {self._stage_max_capacity.get(stage_id, 0) / 1e9:.1f}, "
+                f"run {int(self._stage_inflight.get(stage_id, 0))}"
             )
         print(f"[rebalance] {event} | " + " | ".join(stage_states))
 
@@ -105,12 +113,19 @@ class KVMemoryManager:
         receiver_id: int,
         donor_hint: int | None = None,
         quantum_fraction: float = 0.05,
+        upstream: bool = False,
     ) -> bool:
         quantum = max(1, int(self._capacity * quantum_fraction))
 
         async with self._cond:
             receiver_cap = self._stage_capacity.get(receiver_id, 0)
             receiver_max = self._stage_max_capacity.get(receiver_id, receiver_cap)
+            # Memory moved upstream (to an earlier stage) may not grow it beyond an
+            # equal share of capacity: an early stage's memory ends up held by
+            # fan-out parents until their descendants finish, so it cannot serve
+            # the later stages that need it.
+            if upstream and receiver_id != self._last_stage_id():
+                receiver_max = min(receiver_max, self._capacity / len(self._stage_capacity))
             if receiver_cap >= receiver_max:
                 return False
 
@@ -143,7 +158,7 @@ class KVMemoryManager:
                 self._stage_capacity[donor_id] -= delta
                 self._stage_capacity[receiver_id] += delta
                 self._log_rebalance(
-                    f"borrow receiver={receiver_id} donor={donor_id} delta={int(delta)}"
+                    f"borrow receiver={receiver_id} donor={donor_id} moved {delta / 1e9:.1f} GB"
                 )
                 self._cond.notify_all()
                 return True
@@ -183,7 +198,7 @@ class KVMemoryManager:
             self._stage_capacity[stage_id] -= delta
             self._stage_capacity[receiver_id] += delta
             self._log_rebalance(
-                f"return stage={stage_id} receiver={receiver_id} delta={int(delta)}"
+                f"return stage={stage_id} receiver={receiver_id} moved {delta / 1e9:.1f} GB"
             )
             self._cond.notify_all()
             return True

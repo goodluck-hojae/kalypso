@@ -204,25 +204,31 @@ class AsyncPipelineExecutor:
             if now - last_scheduler_log_at < self.LOG_SCHEDULER_INTERVAL_SEC:
                 return
             last_scheduler_log_at = now
-            stage_states = []
+            # Small table per event, e.g.
+            # [sched] 08:03:11 finish task=12 stage=2
+            # stage   used/cap GB  wait   run
+            #     1   25.7/25.8     325     3  FULL
+            # FULL = has waiting tasks and memory >= 90% used;
+            # SATURATED / STARVING = the stage's rebalancing signals.
+            lines = [
+                f"[sched] {time.strftime('%H:%M:%S')} {event}",
+                f"{'stage':>5} {'used/cap GB':>13} {'wait':>5} {'run':>5}",
+            ]
             for stage in stages:
-                running_task_ids = sorted(stage.running_tasks.keys())
-                waiting_task_ids = [task.task_id for task in stage.waiting_tasks]
                 used, cap = self.manager.stage_usage(stage.stage_id)
-                stage_states.append(
-                    "stage="
-                    f"{stage.stage_id} "
-                    f"used={used:,} cap={cap:,} "
-                    f"waiting={len(waiting_task_ids)} "
-                    f"running={len(running_task_ids)} "
-                    f"retries={retry_counts.get(stage.stage_id, 0)} "
-                    f"deferred_parents={deferred_parent_counts.get(stage.stage_id, 0)} "
-                    f"deferred_reserved={deferred_parent_bytes.get(stage.stage_id, 0):,}"
+                wait, run = len(stage.waiting_tasks), len(stage.running_tasks)
+                flags = []
+                if cap > 0 and used >= 0.9 * cap and wait > 0:
+                    flags.append("FULL")
+                if stage.is_saturated():
+                    flags.append("SATURATED")
+                elif stage.is_starving():
+                    flags.append("STARVING")
+                lines.append(
+                    f"{stage.stage_id:>5}   {used / 1e9:5.1f}/{cap / 1e9:<5.1f} "
+                    f"{wait:>5} {run:>5}  {' '.join(flags)}".rstrip()
                 )
-            print(
-                f"[scheduler] {event} total_retries={total_retries} | "
-                + " | ".join(stage_states)
-            )
+            print("\n".join(lines))
 
         async def finalize_task(task: Task):
             for tracker in task.trackers:
@@ -275,7 +281,8 @@ class AsyncPipelineExecutor:
                     continue
 
                 if await self.manager.rebalance_stage_capacity(
-                    receiver_id=stages[-1].stage_id,
+                    # The saturated stage itself receives the memory.
+                    receiver_id=stage.stage_id,
                     donor_hint=stages[idx].stage_id,
                 ):
                     changed = True
@@ -295,6 +302,7 @@ class AsyncPipelineExecutor:
                 if await self.manager.rebalance_stage_capacity(
                     receiver_id=prev_stage.stage_id,
                     donor_hint=stage.stage_id,
+                    upstream=True,
                 ):
                     changed = True
 
