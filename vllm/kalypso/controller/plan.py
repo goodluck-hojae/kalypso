@@ -122,7 +122,7 @@ class SemanticPlan:
             
             # This is for ablation
             elif num_stages == 3:
-                fixed_fractions = (0.1, 0.3, 0.6)
+                fixed_fractions = (0.1, 0.45, 0.45)
                 for sid, fraction in zip(stage_ids, fixed_fractions):
                     kv.register_stage(
                         sid,
