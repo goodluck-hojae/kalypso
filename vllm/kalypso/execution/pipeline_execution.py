@@ -204,25 +204,24 @@ class AsyncPipelineExecutor:
             if now - last_scheduler_log_at < self.LOG_SCHEDULER_INTERVAL_SEC:
                 return
             last_scheduler_log_at = now
-            stage_states = []
+            # Small table per event, e.g.
+            # [sched] 08:03:11 finish task=12 stage=2
+            # stage   used/cap GB  wait   run
+            #     1   25.7/25.8     325     3  FULL
+            # FULL = has waiting tasks and memory >= 90% used.
+            lines = [
+                f"[sched] {time.strftime('%H:%M:%S')} {event}",
+                f"{'stage':>5} {'used/cap GB':>13} {'wait':>5} {'run':>5}",
+            ]
             for stage in stages:
-                running_task_ids = sorted(stage.running_tasks.keys())
-                waiting_task_ids = [task.task_id for task in stage.waiting_tasks]
                 used, cap = self.manager.stage_usage(stage.stage_id)
-                stage_states.append(
-                    "stage="
-                    f"{stage.stage_id} "
-                    f"used={used:,} cap={cap:,} "
-                    f"waiting={len(waiting_task_ids)} "
-                    f"running={len(running_task_ids)} "
-                    f"retries={retry_counts.get(stage.stage_id, 0)} "
-                    f"deferred_parents={deferred_parent_counts.get(stage.stage_id, 0)} "
-                    f"deferred_reserved={deferred_parent_bytes.get(stage.stage_id, 0):,}"
+                wait, run = len(stage.waiting_tasks), len(stage.running_tasks)
+                full = "  FULL" if cap > 0 and used >= 0.9 * cap and wait > 0 else ""
+                lines.append(
+                    f"{stage.stage_id:>5}   {used / 1e9:5.1f}/{cap / 1e9:<5.1f} "
+                    f"{wait:>5} {run:>5}{full}"
                 )
-            print(
-                f"[scheduler] {event} total_retries={total_retries} | "
-                + " | ".join(stage_states)
-            )
+            print("\n".join(lines))
 
         async def finalize_task(task: Task):
             for tracker in task.trackers:
@@ -275,7 +274,8 @@ class AsyncPipelineExecutor:
                     continue
 
                 if await self.manager.rebalance_stage_capacity(
-                    receiver_id=stages[-1].stage_id,
+                    # The saturated stage itself receives the memory.
+                    receiver_id=stage.stage_id,
                     donor_hint=stages[idx].stage_id,
                 ):
                     changed = True
@@ -295,6 +295,7 @@ class AsyncPipelineExecutor:
                 if await self.manager.rebalance_stage_capacity(
                     receiver_id=prev_stage.stage_id,
                     donor_hint=stage.stage_id,
+                    upstream=True,
                 ):
                     changed = True
 
@@ -479,6 +480,8 @@ class AsyncPipelineExecutor:
 
                     deferred_release = False
                     trackers = task.trackers
+                    # The parent's accumulated prompt is a prefix of every child's prompt.
+                    shared_tokens = self.manager.token_length(result.input.data)
                     if task.ctx.state.pin_req_id is not None:
                         add_deferred_parent(stage.stage_id, budget)
                         if self.LOG_DEFERRAL_TRACE:
@@ -501,8 +504,26 @@ class AsyncPipelineExecutor:
                             ),
                         )
                         deferred_release = True
+                    elif budget > 0:
+                        # Virtual pinning: children share the parent's prefix in the
+                        # prefix cache; reserve it once until the last descendant ends.
+                        shared_budget = min(budget, shared_tokens * self.manager.bytes_per_token)
+                        await stage.release_budget(budget - shared_budget, self.manager)
+                        add_deferred_parent(stage.stage_id, shared_budget)
+                        trackers = trackers + (
+                            JoinTracker(
+                                task.ctx,
+                                len(child_ctxs),
+                                manager=self.manager,
+                                stage_id=stage.stage_id,
+                                reserved_budget=shared_budget,
+                                on_release=release_deferred_parent,
+                            ),
+                        )
+                        deferred_release = True
 
                     for child_ctx in child_ctxs:
+                        child_ctx.state.shared_prefix_tokens = shared_tokens
                         child_task = Task(
                             ctx=child_ctx,
                             stage_index=next_stage_index,

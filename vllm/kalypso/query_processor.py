@@ -179,6 +179,9 @@ class QueryProcessor:
         query_id = f"query-{uuid4().hex}"
         started_at = monotonic()
         kv_before = self._kv_metric_snapshot()
+        # Each query registers its own stages; drop those of earlier queries so
+        # they neither hold capacity nor act as donors/receivers.
+        KVMemoryManager.get_instance().reset_stages()
         try:
             return await plan.execute(raw_request, query)
         finally:

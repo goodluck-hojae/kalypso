@@ -115,7 +115,8 @@ class Stage:
             if not hasattr(op, "estimate_tokens"):
                 raise AttributeError(f"{op} must define `estimate_tokens`")
 
-            estimated_tokens = op.estimate_tokens(task.ctx)
+            # Exclude the prefix already reserved by the parent task.
+            estimated_tokens = max(1, op.estimate_tokens(task.ctx) - getattr(task.ctx.state, "shared_prefix_tokens", 0))
             if estimated_tokens > max_boundary:
                 max_boundary = estimated_tokens
 
