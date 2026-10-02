@@ -135,15 +135,15 @@ class SemanticPlan:
             #             min_fraction=fraction,
             #             max_fraction=fraction,
             #         )
-            # elif num_stages == 2:
-            #     fixed_fractions = (0.9, 0.1)
-            #     for sid, fraction in zip(stage_ids, fixed_fractions):
-            #         kv.register_stage(
-            #             sid,
-            #             fraction,
-            #             min_fraction=fraction,
-            #             max_fraction=fraction,
-            #         )
+            elif num_stages == 2:
+                fixed_fractions = (0.1, 0.9)
+                for sid, fraction in zip(stage_ids, fixed_fractions):
+                    kv.register_stage(
+                        sid,
+                        fraction,
+                        min_fraction=fraction,
+                        max_fraction=fraction,
+                    )
             elif num_stages > 1:
                 total_capacity = kv.capacity()
                 assigned_caps = {
