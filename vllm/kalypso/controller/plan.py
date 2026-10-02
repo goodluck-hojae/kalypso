@@ -136,7 +136,7 @@ class SemanticPlan:
             #             max_fraction=fraction,
             #         )
             elif num_stages == 2:
-                fixed_fractions = (0.7, 0.3)
+                fixed_fractions = (0.9, 0.1)
                 for sid, fraction in zip(stage_ids, fixed_fractions):
                     kv.register_stage(
                         sid,
