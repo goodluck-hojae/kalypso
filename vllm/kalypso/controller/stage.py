@@ -1,3 +1,4 @@
+from vllm.kalypso import op_usage
 from dataclasses import dataclass, field
 import math
 from itertools import count
@@ -181,10 +182,14 @@ class Stage:
                     if idx == task.op_index and task.retry_priority is not None
                     else -(self.priority_offset + idx)
                 )
-                keep_going = await op(
-                    task.ctx,
-                    priority=priority,
-                )
+                token = op_usage.current_op.set(op_usage.op_label(op, self.stage_id, idx))
+                try:
+                    keep_going = await op(
+                        task.ctx,
+                        priority=priority,
+                    )
+                finally:
+                    op_usage.current_op.reset(token)
                 if keep_going is RETRY_TASK:
                     return RetryTaskResult(
                         ctx=task.ctx,

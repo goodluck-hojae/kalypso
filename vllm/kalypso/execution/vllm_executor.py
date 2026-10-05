@@ -3,6 +3,7 @@ import json
 from fastapi import Request
 from vllm.entrypoints.openai.protocol import CompletionRequest, ChatCompletionRequest
 from vllm.kalypso.pin_registry import PinnedRequestRegistry
+from vllm.kalypso import op_usage
 
 from .executor import LLMExecutor, CompletionResult
 
@@ -112,6 +113,7 @@ class VLLMExecutor(LLMExecutor):
 
         raw = gen.body.decode("utf-8")
         data = json.loads(raw)
+        op_usage.record(data.get("usage"))
         request_id = data["id"]
         self._log(
             "[vllm-exec] "
@@ -172,6 +174,7 @@ class VLLMExecutor(LLMExecutor):
 
         raw = gen.body.decode("utf-8")
         data = json.loads(raw)
+        op_usage.record(data.get("usage"))
         request_id = data["id"]
         self._log(
             "[vllm-exec] "

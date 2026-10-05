@@ -8,6 +8,7 @@ from prometheus_client import REGISTRY
 
 from vllm.kalypso.budget import KVMemoryManager
 from vllm.kalypso.query import Query
+from vllm.kalypso import op_usage
 from vllm.kalypso.controller import SemanticPlan
 from vllm.kalypso.execution.vllm_executor import VLLMExecutor
 from vllm.kalypso.pin_registry import PinnedRequestRegistry
@@ -179,6 +180,7 @@ class QueryProcessor:
         query_id = f"query-{uuid4().hex}"
         started_at = monotonic()
         kv_before = self._kv_metric_snapshot()
+        op_usage.snapshot_and_reset()
         # Each query registers its own stages; drop those of earlier queries so
         # they neither hold capacity nor act as donors/receivers.
         KVMemoryManager.get_instance().reset_stages()
@@ -199,6 +201,10 @@ class QueryProcessor:
                 print(
                     "[QueryProcessor] QUERY_KV_STATS "
                     + json.dumps(stats, sort_keys=True)
+                )
+                print(
+                    "[QueryProcessor] OP_TOKEN_STATS "
+                    + json.dumps(op_usage.snapshot_and_reset(), sort_keys=True)
                 )
 
     def start_stuck_monitor(self, engine_client):

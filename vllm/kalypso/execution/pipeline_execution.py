@@ -3,6 +3,7 @@ import asyncio
 import time
 
 from vllm.kalypso.budget import KVMemoryManager
+from vllm.kalypso import op_usage
 from vllm.kalypso.context import RetryTaskResult
 from vllm.kalypso.controller.stage import Task
 from vllm.kalypso.sem_ops import OpBehavior, ops
@@ -30,6 +31,7 @@ class PlanExecutor:
                     f"position={item.position} "
                     f"input_tuples={input_count}"
                 )
+                token = op_usage.current_op.set(f"b.{item.position}:{operator_name}")
                 try:
                     ctxs = await item(ctxs)
                 except Exception as exc:
@@ -43,6 +45,8 @@ class PlanExecutor:
                         f"error={type(exc).__name__}"
                     )
                     raise
+                finally:
+                    op_usage.current_op.reset(token)
                 elapsed = time.perf_counter() - started_at
                 print(
                     "[blocking-operator] done "
