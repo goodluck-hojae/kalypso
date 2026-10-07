@@ -235,3 +235,4 @@ ep_kernels_workspace/
 !vllm/benchmarks/lib/
 
 vllm/kalypso/data/json
+eval_runs/

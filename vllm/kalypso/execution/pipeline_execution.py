@@ -212,10 +212,10 @@ class AsyncPipelineExecutor:
             # [sched] 08:03:11 finish task=12 stage=2
             # stage   used/cap GB  wait   run
             #     1   25.7/25.8     325     3  FULL
-            # FULL = has waiting tasks and memory >= 90% used.
+            # defer GB = memory held by deferred tasks; FULL = has waiting tasks and memory >= 90% used.
             lines = [
                 f"[sched] {time.strftime('%H:%M:%S')} {event}",
-                f"{'stage':>5} {'used/cap GB':>13} {'wait':>5} {'run':>5}",
+                f"{'stage':>5} {'used/cap GB':>13} {'wait':>5} {'run':>5} {'defer GB':>8}",
             ]
             for stage in stages:
                 used, cap = self.manager.stage_usage(stage.stage_id)
@@ -223,7 +223,8 @@ class AsyncPipelineExecutor:
                 full = "  FULL" if cap > 0 and used >= 0.9 * cap and wait > 0 else ""
                 lines.append(
                     f"{stage.stage_id:>5}   {used / 1e9:5.1f}/{cap / 1e9:<5.1f} "
-                    f"{wait:>5} {run:>5}{full}"
+                    f"{wait:>5} {run:>5} "
+                    f"{deferred_parent_bytes.get(stage.stage_id, 0) / 1e9:8.1f}{full}"
                 )
             print("\n".join(lines))
 
@@ -255,53 +256,43 @@ class AsyncPipelineExecutor:
         def has_pending_work():
             return any(stage.has_waiting_tasks() for stage in stages)
 
+        def pick_donor(receiver):
+            # 1st choice: starving stages, 2nd: busy stages (from the last stage);
+            # saturated stages never donate. Only free capacity can move.
+            for is_candidate in (lambda st: st.is_starving(), lambda st: st.is_busy()):
+                for stage in reversed(stages):
+                    if (
+                        stage is not receiver
+                        and is_candidate(stage)
+                        and self.manager.stage_free(stage.stage_id) > 0
+                    ):
+                        return stage
+            return None
+
         async def rebalance_stage_capacity():
             if not self.MEMORY_ADMISSION_CONTROL:
                 return
 
-            changed = False
-
             for stage in stages:
                 stage.tune_thresholds()
 
-            # Keep draining idle stages toward their floor so later stages
-            # can absorb capacity when they are the bottleneck.
-            for stage in stages:
-                if stage.ready_count() == 0 and stage.running_count() == 0:
-                    if await self.manager.return_stage_capacity(stage.stage_id, force_return=True):
-                        changed = True
-
-            # Grow any stage with a saturated queue. Prefer borrowing from the
-            # immediate upstream stage first because that matches pipeline flow.
-            for idx, stage in enumerate(stages[1:]):
-                if not stage.is_saturated():
-                    continue
-
-                if await self.manager.rebalance_stage_capacity(
-                    # The saturated stage itself receives the memory.
-                    receiver_id=stage.stage_id,
-                    donor_hint=stages[idx].stage_id,
-                ):
-                    changed = True
-
-            # If a later stage is empty while the previous stage still has work,
-            # bias capacity upstream so the pipeline can produce tuples for it.
-            for idx in range(1, len(stages)):
+            # MORE_RUNNING from the last stage: a busy stage ends the walk; a saturated
+            # stage (work queued, too few running) receives memory; a starving stage
+            # (little queued and running) passes the request to the previous stage.
+            changed = False
+            for idx in range(len(stages) - 1, -1, -1):
                 stage = stages[idx]
-                prev_stage = stages[idx - 1]
-    
-                if not (stage.is_starving()):
-                    continue
-                head_task = prev_stage.peek_task()
-                if head_task is None:
-                    continue
-
-                if await self.manager.rebalance_stage_capacity(
-                    receiver_id=prev_stage.stage_id,
-                    donor_hint=stage.stage_id,
-                    upstream=True,
-                ):
-                    changed = True
+                if stage.is_busy():
+                    break
+                if stage.is_saturated():
+                    donor = pick_donor(stage)
+                    if donor is not None:
+                        changed = await self.manager.transfer_capacity(
+                            donor.stage_id,
+                            stage.stage_id,
+                            upstream=stages.index(donor) > idx,
+                        )
+                    break
 
             if changed:
                 log_running_tasks("rebalance")
@@ -445,7 +436,7 @@ class AsyncPipelineExecutor:
                         f"retry task={task.task_id} stage={stage.stage_id} "
                         f"retain_budget={result.retain_budget}"
                     )
-                    await rebalance_stage_capacity()
+                    # await rebalance_stage_capacity()
                     continue
 
                 if result is None:
@@ -453,7 +444,7 @@ class AsyncPipelineExecutor:
                     log_running_tasks(
                         f"finish task={task.task_id} stage={stage.stage_id}"
                     )
-                    await rebalance_stage_capacity()
+                    # await rebalance_stage_capacity()
                     await finalize_task(task)
                     continue
 
@@ -473,7 +464,7 @@ class AsyncPipelineExecutor:
                         log_running_tasks(
                             f"finish task={task.task_id} stage={stage.stage_id}"
                         )
-                        await rebalance_stage_capacity()
+                        # await rebalance_stage_capacity()
                         await finalize_task(task)
                         continue
 
@@ -546,7 +537,7 @@ class AsyncPipelineExecutor:
                         f"finish task={task.task_id} stage={stage.stage_id} "
                         f"deferred_release={deferred_release}"
                     )
-                    await rebalance_stage_capacity()
+                    # await rebalance_stage_capacity()
                     continue
 
                 record_output(stage.stage_id, 1)
@@ -565,7 +556,7 @@ class AsyncPipelineExecutor:
                 log_running_tasks(
                     f"finish task={task.task_id} stage={stage.stage_id}"
                 )
-                await rebalance_stage_capacity()
+                # await rebalance_stage_capacity()
 
         return out, stage_stat
 

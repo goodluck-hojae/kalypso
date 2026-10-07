@@ -165,6 +165,39 @@ class KVMemoryManager:
 
             return False
 
+    def stage_free(self, stage_id: int) -> int:
+        """Capacity a stage can give away: its cap above max(min capacity, used).
+        Used memory includes running and deferred tasks, so it never moves."""
+        cap = self._stage_capacity.get(stage_id, 0)
+        floor = max(self._stage_min_capacity.get(stage_id, cap), self._stage_used.get(stage_id, 0))
+        return max(0, int(cap - floor))
+
+    async def transfer_capacity(
+        self,
+        donor_id: int,
+        receiver_id: int,
+        quantum_fraction: float = 0.05,
+        upstream: bool = False,
+    ) -> bool:
+        """Move up to one quantum of the donor's free capacity to the receiver.
+        Memory moving upstream may not grow a non-last stage beyond an equal share."""
+        quantum = max(1, int(self._capacity * quantum_fraction))
+        async with self._cond:
+            receiver_cap = self._stage_capacity.get(receiver_id, 0)
+            receiver_max = self._stage_max_capacity.get(receiver_id, receiver_cap)
+            if upstream and receiver_id != self._last_stage_id():
+                receiver_max = min(receiver_max, self._capacity / len(self._stage_capacity))
+            delta = min(quantum, self.stage_free(donor_id), receiver_max - receiver_cap)
+            if delta <= 0:
+                return False
+            self._stage_capacity[donor_id] -= delta
+            self._stage_capacity[receiver_id] += delta
+            self._log_rebalance(
+                f"transfer donor={donor_id} receiver={receiver_id} moved {delta / 1e9:.1f} GB"
+            )
+            self._cond.notify_all()
+            return True
+
     async def return_stage_capacity(
         self,
         stage_id: int,

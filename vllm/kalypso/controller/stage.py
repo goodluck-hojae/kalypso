@@ -24,6 +24,10 @@ class Task:
 
 
 class Stage:
+    # beta: low = beta * cap / min_budget. A stage is busy if running >= low,
+    # saturated if running < low and waiting >= low, starving otherwise.
+    LOW_THRESHOLD_RATIO = 0.2
+
     def __init__(
         self,
         stage_id: int,
@@ -41,7 +45,6 @@ class Stage:
         self.running_tasks = {}
         self.bytes_per_token = KVMemoryManager.get_instance().bytes_per_token
         self.low_threshold = 1
-        self.high_threshold = 5
 
     def _infer_behavior(self) -> OpBehavior:
         return OpBehavior.TUPLE_INDEPENDENT
@@ -80,11 +83,14 @@ class Stage:
     def running_count(self) -> int:
         return len(self.running_tasks)
 
-    def is_starving(self) -> bool:
-        return self.ready_count() < self.low_threshold
+    def is_busy(self) -> bool:
+        return self.running_count() >= self.low_threshold
 
     def is_saturated(self) -> bool:
-        return self.ready_count() > self.high_threshold
+        return not self.is_busy() and self.ready_count() >= self.low_threshold
+
+    def is_starving(self) -> bool:
+        return not self.is_busy() and self.ready_count() < self.low_threshold
 
     def tune_thresholds(self):
         manager = KVMemoryManager.get_instance()
@@ -93,8 +99,7 @@ class Stage:
             min_budget = max(1, int(self.bytes_per_token))
 
         _, cur_cap = manager.stage_usage(self.stage_id)
-        self.high_threshold = max(1, int(1 * cur_cap // min_budget))
-        self.low_threshold = max(1, int(0.5 * cur_cap // min_budget))
+        self.low_threshold = max(1, int(self.LOW_THRESHOLD_RATIO * cur_cap // min_budget))
         # print(f'{self.stage_id}-{self.low_threshold}, self.is_starving(): {self.is_starving()}, self.is_saturated(): {self.is_saturated()}')
 
     def peek_task(self) -> Task | None:
