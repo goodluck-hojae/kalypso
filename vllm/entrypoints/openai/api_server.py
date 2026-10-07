@@ -245,6 +245,10 @@ def build_app(
 
         elastic_ep_attach_router(app)
 
+        from vllm.kalypso.api_router import attach_router as kalypso_attach_router
+
+        kalypso_attach_router(app)
+
     if "generate" in supported_tasks or "render" in supported_tasks:
         from vllm.entrypoints.scale_out.factories import register_scale_out_api_routers
 
@@ -480,6 +484,11 @@ async def init_app_state(
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0
+
+    if "generate" in supported_tasks:
+        from vllm.kalypso.api_router import init_kalypso_state
+
+        await init_kalypso_state(engine_client, state)
 
 
 async def init_render_app_state(

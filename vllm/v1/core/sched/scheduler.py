@@ -2321,7 +2321,7 @@ class Scheduler(SchedulerInterface):
             self.finished_req_ids_dict[request.client_index].add(request_id)
 
         delay_free_blocks |= connector_delay_free_blocks
-        if not delay_free_blocks:
+        if not delay_free_blocks and not request.pinned:
             self._free_blocks(request)
 
         return kv_xfer_params, ec_xfer_params

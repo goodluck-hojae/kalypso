@@ -663,7 +663,8 @@ class BlockPool:
         # In order to only iterate the list once, we duplicated code a bit
         if self.enable_caching:
             for block in ret:
-                self._maybe_evict_cached_block(block)
+                if not block.pinned:
+                    self._maybe_evict_cached_block(block)
                 assert block.ref_cnt == 0
                 block.ref_cnt += 1
                 if self.metrics_collector:
@@ -710,7 +711,7 @@ class BlockPool:
         for block in blocks:
             # ref_cnt=0 means this block is in the free list (i.e. eviction
             # candidate), so remove it.
-            if block.ref_cnt == 0 and not block.is_null:
+            if block.ref_cnt == 0 and not block.is_null and not block.pinned:
                 self.free_block_queue.remove(block)
             block.ref_cnt += 1
             if self.metrics_collector:
@@ -729,7 +730,7 @@ class BlockPool:
         blocks_without_hash = []
         for block in ordered_blocks:
             block.ref_cnt -= 1
-            if block.ref_cnt == 0 and not block.is_null:
+            if block.ref_cnt == 0 and not block.is_null and not block.pinned:
                 # When caching is disabled we always append for better
                 # GPU cache locality from reusing recently used blocks
                 if block.block_hash is None and self.enable_caching:

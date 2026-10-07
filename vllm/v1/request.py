@@ -225,7 +225,7 @@ class Request:
         request: EngineCoreRequest,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None,
     ) -> "Request":
-        return cls(
+        req = cls(
             request_id=request.request_id,
             client_index=request.client_index,
             prompt_token_ids=request.prompt_token_ids,
@@ -245,6 +245,13 @@ class Request:
             reasoning_parser_kwargs=request.reasoning_parser_kwargs,
             abort_immediately=request.abort_immediately,
         )
+        req.external_req_id = request.external_req_id
+        req.pinned = bool(
+            request.sampling_params.extra_args.get("pinned", False)
+            if request.sampling_params and request.sampling_params.extra_args
+            else False
+        )
+        return req
 
     def append_output_token_ids(
         self,

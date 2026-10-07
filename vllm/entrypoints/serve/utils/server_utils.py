@@ -576,6 +576,9 @@ async def lifespan(app: FastAPI):
                 serving = getattr(app.state, attr_name, None)
                 if serving is not None and hasattr(serving, "shutdown"):
                     serving.shutdown()
+            from vllm.kalypso.api_router import stop_kalypso_state
+
+            stop_kalypso_state(app.state)
     finally:
         # Ensure app state including engine ref is gc'd
         del app.state

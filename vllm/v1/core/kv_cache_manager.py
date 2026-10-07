@@ -185,6 +185,7 @@ class KVCacheManager:
         self.empty_kv_cache_blocks = KVCacheBlocks(
             tuple(() for _ in range(self.num_kv_cache_groups))
         )
+        self.pinned_req_ids: dict[str, str] = {}
 
         # Off-table cow blocks handed to a KV connector for partial-tail
         # offload; pinned until the request's blocks are freed.
@@ -562,7 +563,61 @@ class KVCacheManager:
         )
         self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
+        if request.pinned:
+            if request.external_req_id is not None:
+                self.pinned_req_ids[request.external_req_id] = request.request_id
+            self.pin_request(request.request_id)
+
         return self.create_kv_cache_blocks(new_blocks)
+
+    def pin_request(self, request_id: str) -> None:
+        request_id = self.pinned_req_ids.get(request_id, request_id)
+        blocks = self.coordinator.get_blocks(request_id)
+
+        for group in blocks:
+            for blk in group:
+                if blk.is_null or blk.block_hash is None:
+                    continue
+                blk.pinned = True
+
+    def unpin_request(self, request_id: str) -> None:
+        request_id = self.pinned_req_ids.pop(request_id, request_id)
+        blocks = self.coordinator.get_blocks(request_id)
+
+        for group in blocks:
+            for blk in group:
+                blk.pinned = False
+        self.coordinator.free(request_id)
+
+    def get_pinned_requests(self) -> list[dict[str, int | str]]:
+        request_ids = set[str]()
+        for manager in self.coordinator.single_type_managers:
+            request_ids.update(manager.req_to_blocks.keys())
+
+        pinned_requests: list[dict[str, int | str]] = []
+        for request_id in sorted(request_ids):
+            blocks = self.coordinator.get_blocks(request_id)
+            total_blocks = 0
+            pinned_blocks = 0
+
+            for group in blocks:
+                for blk in group:
+                    if blk.is_null:
+                        continue
+                    total_blocks += 1
+                    if blk.pinned:
+                        pinned_blocks += 1
+
+            if pinned_blocks > 0:
+                pinned_requests.append(
+                    {
+                        "request_id": request_id,
+                        "pinned_blocks": pinned_blocks,
+                        "total_blocks": total_blocks,
+                    }
+                )
+
+        return pinned_requests
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.

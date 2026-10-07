@@ -490,6 +490,32 @@ class EngineCore:
         # (i.e. client-aborted vs stop criteria met).
         self.scheduler.finish_requests(request_ids, RequestStatus.FINISHED_ABORTED)
 
+    def pin_request(self, request_id: str) -> None:
+        self.scheduler.kv_cache_manager.pin_request(request_id + "-0")
+
+    def unpin_request(self, request_id: str) -> None:
+        self.scheduler.kv_cache_manager.unpin_request(request_id)
+
+    def get_pinned_requests(self):
+        return self.scheduler.kv_cache_manager.get_pinned_requests()
+
+    def unpin_requests(self, request_ids: list[str]):
+        for request_id in request_ids:
+            self.scheduler.kv_cache_manager.unpin_request(request_id)
+
+    def get_scheduler_state(self):
+        num_running_reqs, num_waiting_reqs = self.scheduler.get_request_counts()
+        kv_cache_usage = self.scheduler.kv_cache_manager.usage
+        return {
+            "running": num_running_reqs,
+            "waiting": num_waiting_reqs,
+            "kv_cache_usage": kv_cache_usage,
+            "is_stuck": (num_waiting_reqs > 0 and kv_cache_usage >= 0.99),
+        }
+
+    def get_kv_cache_budget(self):
+        return self.available_gpu_memory_for_kv_cache
+
     @contextmanager
     def log_error_detail(self, scheduler_output: SchedulerOutput):
         """Execute the model and log detailed info on failure."""
