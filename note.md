@@ -32,7 +32,9 @@ A downstream stage waiting for children from upstream looks *starving*, so it ca
 
 ## Data and vector databases (FEVER Wikipedia, BioDEX)
 
-**Warning (checked 2026-10-06):** on this filesystem the inputs are gone. `~/projects/semops-experiments/data/` and `pipelines/lotus/logs/` are empty, and `/scratch/hojaeson_umass/backup/semops-experiments/` holds only the directory tree (5 files). `~/kalypso/vllm/kalypso/benchmark/sample_data/` has only small samples (e.g. `reactions/` = 10 files). Find the real copy first, or rebuild as below.
+**Data location (checked 2026-10-06):** BioDEX / ContractNLI / MEDEC / FEVER-claims data are in `~/kalypso/vllm/kalypso/benchmark/data/` (`biodex/{articles_500 (500), reactions (11,271)}`, `contract-nli/`, `medec/`, `fever/fever_claims_sample_1000_data.csv`, plus `.zip` copies). `~/projects/semops-experiments/data/` and `pipelines/lotus/logs/` are empty (emptied 2026-10-02 18:47–18:50); `/scratch/hojaeson_umass/backup/semops-experiments/` has only the directory tree. Point clients at the kalypso copy, e.g. `BIODEX_ARTICLE_DIR=~/kalypso/vllm/kalypso/benchmark/data/biodex/articles_500 BIODEX_REACTION_DIR=~/kalypso/vllm/kalypso/benchmark/data/biodex/reactions`, or symlink it into `semops-experiments/data/`.
+
+**FEVER corpus + ColBERT index: not found** in `~`, `/scratch/hojaeson_umass`, `/work`, or the HF cache (searched for `wikipedia.tsv`, `beir_fever_corpus_data.csv`, `ivf.pid.pt`, `doclens.0.json`, `0.codes.pt`, files > 1 GB). The HF cache does have the models (`colbert-ir/colbertv2.0`, `intfloat/e5-base-v2`). Possibly on an old node's local disk or deleted on 2026-10-02; otherwise rebuild (below).
 
 Needed by the clients (`PROJECT_ROOT = ~/projects/semops-experiments`):
 
