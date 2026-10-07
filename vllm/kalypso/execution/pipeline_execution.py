@@ -276,23 +276,51 @@ class AsyncPipelineExecutor:
             for stage in stages:
                 stage.tune_thresholds()
 
-            # MORE_RUNNING from the last stage: a busy stage ends the walk; a saturated
-            # stage (work queued, too few running) receives memory; a starving stage
-            # (little queued and running) passes the request to the previous stage.
-            changed = False
-            for idx in range(len(stages) - 1, -1, -1):
+            def no_free_mem(stage):
+                head = stage.peek_task()
+                if head is None:
+                    return False
+                used, cap = self.manager.stage_usage(stage.stage_id)
+                return used + stage.estimate_budget(head) > cap
+
+            asked = set()
+
+            def memory_donor(receiver):
+                for st in stages:
+                    if (
+                        st is not receiver
+                        and st.stage_id not in asked
+                        and self.manager.stage_free(st.stage_id) > 0
+                    ):
+                        return st
+                candidates = [
+                    st for st in reversed(stages)
+                    if st is not receiver
+                    and not no_free_mem(st)
+                    and self.manager.stage_free(st.stage_id) > 0
+                ]
+                candidates.sort(key=lambda st: st.ready_count() >= st.low_threshold)
+                return candidates[0] if candidates else None
+
+            async def more_running(idx):
+                if idx < 0:
+                    return False
                 stage = stages[idx]
-                if stage.is_busy():
-                    break
-                if stage.is_saturated():
-                    donor = pick_donor(stage)
+                asked.add(stage.stage_id)
+                moved = False
+                if stage.ready_count() < stage.low_threshold:
+                    moved = await more_running(idx - 1)
+                if no_free_mem(stage):
+                    donor = memory_donor(stage)
                     if donor is not None:
-                        changed = await self.manager.transfer_capacity(
+                        moved = await self.manager.transfer_capacity(
                             donor.stage_id,
                             stage.stage_id,
                             upstream=stages.index(donor) > idx,
-                        )
-                    break
+                        ) or moved
+                return moved
+
+            changed = await more_running(len(stages) - 1)
 
             if changed:
                 log_running_tasks("rebalance")

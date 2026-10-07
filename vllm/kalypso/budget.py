@@ -185,8 +185,6 @@ class KVMemoryManager:
         async with self._cond:
             receiver_cap = self._stage_capacity.get(receiver_id, 0)
             receiver_max = self._stage_max_capacity.get(receiver_id, receiver_cap)
-            if upstream and receiver_id != self._last_stage_id():
-                receiver_max = min(receiver_max, self._capacity / len(self._stage_capacity))
             delta = min(quantum, self.stage_free(donor_id), receiver_max - receiver_cap)
             if delta <= 0:
                 return False
