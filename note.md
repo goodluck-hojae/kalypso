@@ -30,6 +30,52 @@ None of this has been run yet.
 ## Open question to check in the gate log
 A downstream stage waiting for children from upstream looks *starving*, so it can be picked as a donor just before its children arrive, then need the memory back. Unverified. Check the 3S gate log for: transfer `donor=<last> receiver=1` followed soon by the last stage SATURATED. Fix only if it shows up and the run is behind (idea: `inflow(s) = running(prev stage)`, starving iff `waiting + inflow < low`).
 
+## Data and vector databases (FEVER Wikipedia, BioDEX)
+
+**Warning (checked 2026-10-06):** on this filesystem the inputs are gone. `~/projects/semops-experiments/data/` and `pipelines/lotus/logs/` are empty, and `/scratch/hojaeson_umass/backup/semops-experiments/` holds only the directory tree (5 files). `~/kalypso/vllm/kalypso/benchmark/sample_data/` has only small samples (e.g. `reactions/` = 10 files). Find the real copy first, or rebuild as below.
+
+Needed by the clients (`PROJECT_ROOT = ~/projects/semops-experiments`):
+
+| Workload | Path | Notes |
+|---|---|---|
+| BioDEX | `data/articles_500/`, `data/reactions/` | override: `BIODEX_ARTICLE_DIR`, `BIODEX_REACTION_DIR` |
+| NLI / 3S | `data/contract-nli/` | |
+| MEDEC | MEDEC csv (sample: `benchmark/sample_data/MEDEC-TrainingSet-1000.csv`) | |
+| FEVER claims | `data/fever_claims_sample_1000_data.csv` | sample copy in `benchmark/sample_data/` |
+| FEVER corpus | `data/beir_fever_corpus_data.csv` | only to build the ColBERT index |
+| FEVER index | `pipelines/lotus/logs/colbert_indexes/{collections/wikipedia.tsv, wikipedia/indexes/fever_factool_wikipedia_colbert/}` | read by `vector_service.py --backend colbert` |
+
+### BioDEX: nothing to prebuild
+`vector_service.py` without `--backend` uses FAISS (`IndexFlatIP`, model `intfloat/e5-base-v2`). The BioDEX client calls `POST /build_index` with the reaction table at the start of each run, and the index is built in memory. You only need `data/reactions/`, plus the e5 model in `HF_HOME` (downloaded on first use).
+```bash
+CUDA_VISIBLE_DEVICES= $PY -u ~/kalypso/vllm/kalypso/icp/vector_service.py --host 127.0.0.1 --port 8080
+```
+
+### FEVER: build the ColBERT Wikipedia index once
+Script: `~/projects/semops-experiments/pipelines/lotus/colbert_test.py`. It writes `collections/wikipedia.tsv` from the corpus CSV (text column `data`), then runs ColBERT `Indexer`. ColBERT source: `~/projects/semops-experiments/projects/ColBERT`.
+The settings of the original build (from its `plan.json`): checkpoint `colbert-ir/colbertv2.0`, nbits 2, doc_maxlen 180, kmeans_niters 20, nranks 1, experiment `wikipedia`, index name `fever_factool_wikipedia_colbert`. Size: about 5.4M passages, 442M embeddings, 217 chunks, 262,144 partitions, so expect hours on one GPU.
+```bash
+cd ~/projects/semops-experiments/pipelines/lotus
+# env: CUDA_HOME set (cuda/13.1.1 module) and nvcc on PATH, needed for ColBERT's torch extensions
+COLBERT_INDEX_ROOT=$PWD/logs/colbert_indexes \
+CUDA_VISIBLE_DEVICES=0 $PY -u colbert_test.py \
+  --corpus-csv ../../data/beir_fever_corpus_data.csv --text-column data \
+  --nbits 2 --nranks 1 --experiment wikipedia --index-name fever_factool_wikipedia_colbert
+# result: logs/colbert_indexes/wikipedia/indexes/fever_factool_wikipedia_colbert/
+```
+`--overwrite reuse` (default) keeps an existing index; use `resume` to continue a partial build.
+A stray partial build (only `plan.json`) is in `projects/ColBERT/experiments/wikipedia/`. It is not used.
+
+**Unknown:** how `beir_fever_corpus_data.csv` was made. It is the BEIR FEVER corpus (5.42M docs, matching the 5.4M estimate) saved with a `data` text column, so probably `load_dataset("BeIR/fever", "corpus")` → CSV with `data = title + text`. Not verified; check the original file if you find it.
+
+Then serve it:
+```bash
+CUDA_VISIBLE_DEVICES= $PY -u ~/kalypso/vllm/kalypso/icp/vector_service.py --host 127.0.0.1 --port 8080 --backend colbert
+# other paths: --colbert-experiment-root, --colbert-collection, --colbert-root, --colbert-index-name
+curl -fsS localhost:8080/health
+```
+FEVER also needs the 8B cascade helper on 8004 (`bash ~/launch_vllm_py312_8b.sh`).
+
 ## Runs
 
 | # | Phase | Run | Workload | Paper target | Status |
