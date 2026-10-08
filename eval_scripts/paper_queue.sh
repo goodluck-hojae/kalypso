@@ -11,6 +11,17 @@ QLLM=~/projects/semops-experiments/pipelines/qllm
 #   ~/kalypso/eval_runs/paper_queue.sh > ~/kalypso/eval_runs/paper_queue.log 2>&1 &
 # Needs: tmux sessions vllm / vllm2 / lotus (see note.md), BioDEX vector service on :8080 (GPU 0).
 
+# Kill only the main (70B) server: whatever listens on :8003 plus my processes on GPUs 1-4.
+# Never touch GPU 0 (the job's own 8B helper: if it exits, the sbatch script ends and the job is released).
+kill_main_server() {
+  SIG=${1:--15}
+  pids=$(ss -ltnp 2>/dev/null | grep ':8003 ' | grep -oE 'pid=[0-9]+' | cut -d= -f2)
+  for uuid in $(nvidia-smi --query-gpu=index,uuid --format=csv,noheader | awk -F', ' '$1>=1 && $1<=4 {print $2}'); do
+    pids="$pids $(nvidia-smi --query-compute-apps=pid,gpu_uuid --format=csv,noheader | awk -F', ' -v u=$uuid '$2==u {print $1}')"
+  done
+  for p in $pids; do [ "$(ps -o uid= -p $p 2>/dev/null | tr -d " ")" = "$(id -u)" ] && kill $SIG $p 2>/dev/null; done
+}
+
 client_for() {
   case $1 in
     biodex) echo client_biodex_map_icp.py ;;
@@ -23,8 +34,8 @@ client_for() {
 run() {  # run <name> <workload> <mem> <priority on|off> <virtual on|off>
   X=$1; W=$2; MEM=$3; PRI=$4; VIRT=$5
   python3 $E/cfg.py priority $PRI; python3 $E/cfg.py virtual $VIRT
-  for p in $(ps -eo pid,args | awk '$2 ~ /^VLLM::/ {print $1}'); do [ "$p" = "917067" ] || kill $p 2>/dev/null; done; sleep 10
-  for p in $(ps -eo pid,args | awk '$2 ~ /^VLLM::/ {print $1}'); do [ "$p" = "917067" ] || kill -9 $p 2>/dev/null; done; sleep 5
+  kill_main_server; sleep 10
+  kill_main_server -9; sleep 5
   tmux send-keys -t vllm:0 C-c; sleep 3
   T=$(date +%Y%m%d-%H%M%S); S_LOG=$L/server_vllm_$(hostname -s)_${X}_$T.log
   tmux send-keys -t vllm:0 -l "VLLM_GPU_MEMORY_UTILIZATION=$MEM bash ~/launch_vllm_py312_kvmetrics.sh 2>&1 | tee $S_LOG"
