@@ -381,9 +381,12 @@ class AsyncPipelineExecutor:
                 moved = False
                 if stage.is_starving():
                     moved = await more_running(idx - 1)
-                # Every stage asks for memory when its waiting queue does not fit in
-                # its free memory (the same rule for all stages, whatever their task size).
-                needs_memory = backlog_needs_memory(stage)
+                # The last stage runs many small tasks: it asks for memory when its
+                # backlog does not fit; earlier stages when their next task does not fit.
+                if idx == len(stages) - 1:
+                    needs_memory = backlog_needs_memory(stage)
+                else:
+                    needs_memory = no_free_mem(stage)
                 if needs_memory and may_receive(idx):
                     donor = memory_donor(stage)
                     _, cap_before = self.manager.stage_usage(stage.stage_id) if donor is not None else (0, 0)
