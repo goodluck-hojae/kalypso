@@ -24,7 +24,7 @@ Code: `vllm/kalypso/execution/pipeline_execution.py` (`rebalance_stage_capacity`
 Typical values on Llama-70B 3S: chunk about 4.1 GB / 1.5 GB / 0.1 GB and wait about 1 s / 2.7 s / 40 s for stages 3 / 2 / 1.
 Logging: `REBALANCE_LOG = True` in `budget.py`; each `[sched]` table row shows used/cap, waiting, running, deferred GB and `SATURATED`/`STARVING`/`BLOCKED`.
 
-Alternative that was tried (commit `a66336e6a`): memory-based states (starving = free memory fits a task and the queue cannot fill it). 2,298.8 s, but it ran while another user's CPU jobs were on the node (see 3), so it is not a fair comparison with 2,123.9 s. Not used for the paper runs.
+Alternative (branch `scheduler-fix-5`, = commit `a66336e6a`): memory-based states (starving = free memory fits a task and the queue cannot fill it). 2,298.8 s, but it ran in the slow window on a0008 (see 3), where static 20/40/40 took 2,487.7 s, so it is not a fair comparison with 2,123.9 s. Not used for the paper runs.
 
 ## 2. Results so far (Llama-3.3-70B, TP 4, gpu-mem 0.6, KV-metrics server, node a0008)
 
@@ -45,12 +45,12 @@ Older reference numbers (paper, before this work): 3S 2043.4 (old adaptive, a000
 
 ## 3. Things that went wrong (avoid them)
 
-1. **Other users on the node.** From 00:00 on 2026-10-08 another user's 3 CPU jobs (`train_sac.py`) ran on a0008 and slowed every run by 10-17%. Before each run check `ps -eo user,pcpu,args --sort=-pcpu | head`; if other users' jobs use CPU, note it in the run's config text or wait.
+1. **Unexplained slowdown on a0008 after ~00:00 (2026-10-08).** The same static 20/40/40 3S run took ~2120 s before and 2487.7 s after. It was first blamed on another user's CPU jobs, but Slurm pins each job to its own cores (our job: cores 0,2-20; theirs: 21-45), so that explanation is wrong. Cause unknown (possibly a node-level shared resource). Runs marked "under CPU load" below = ran in that window; compare them only with runs from the same window.
 2. **BioDEX vector service on CPU** makes BioDEX ~3.6x slower (vLLM idles while the client waits). Always run it on GPU 0 (command in 5.4).
 3. **Killing the server.** `kill` on the API server pid can leave `VLLM::EngineCore` / `VLLM::Worker_TP*` alive holding GPUs. Kill by process title: `ps -eo pid,args | awk '$2 ~ /^VLLM::/'` (keep the 8B helper's EngineCore if FEVER needs it). Never `pkill -f` a pattern that appears in your own command line.
 4. **Switching branches** between `scheduler-fix-3` and `-4` deletes `vllm/vllm_flash_attn/__init__.py` and `flash_attn_interface.py`. Restore: `cp ~/kalypso/.deps/vllm-flash-attn-src/vllm_flash_attn/*.py ~/kalypso/vllm/vllm_flash_attn/`.
 5. **Do not stop runs early.** Let every run finish; token-curve comparisons in the first 10 min were misleading several times.
-6. **The job allocation ends.** The a0008 job ended at about 03:51 and killed the queue mid-run (3S no-priority at 12 min). Check the job time limit before starting a long queue.
+6. **The job allocation ends.** a0008 (job 1195213) timed out at 03:51 and killed the queue (3S no-priority at 12 min); a0007 (job 1226600) ended at 08:46 before the queue started. Check `scontrol show job <id> | grep TimeLimit` and start the queue detached (`setsid nohup ... &`) so a Claude session restart does not kill it.
 
 ## 4. What is left (in order)
 
