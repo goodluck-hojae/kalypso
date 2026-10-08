@@ -1,36 +1,137 @@
-# Kalypso — working notes (2026-10-06)
+# Kalypso evaluation handoff (2026-10-08)
 
-Branch: `scheduler-fix-2`. Paper: `~/projects/pipelining-semantic-operator-tex`.
-Local-only helpers (gitignored, copy them by hand if the new node has no shared home): `eval_runs/` (record_run.sh, start_run.sh, watch_*.sh, sched_view.py, sched_compare.py, cfg.py, ref_*.json, results.tsv, TODO.md).
+Everything needed to continue the paper evaluation: scheduler setting, results so far, what is left, and exact steps.
+Paper repo: `~/projects/pipelining-semantic-operator-tex` (`sections/5-evaluation.tex`). Code: this repo, branch `scheduler-fix-4`.
 
-## What was done
+## 1. Scheduler setting to use ("fix-4", commit `0d5ae7766`)
 
-### Scheduler (this commit)
-New rebalancing, replacing the old starving / saturated / idle-return rules and α:
-- `low = max(1, β·cap/min_budget)`, β = 0.2 (`Stage.LOW_THRESHOLD_RATIO`).
-- busy: `running ≥ low`; saturated: not busy and `waiting ≥ low`; starving: not busy and `waiting < low`.
-- `MORE_RUNNING` walks from the last stage only: busy → stop; saturated → receives from `PICK_DONOR`, stop; starving → previous stage.
-- `PICK_DONOR` (from the last stage): first starving with free > 0, then busy with free > 0. Saturated stages never donate.
-- Transfer = min(5% capacity, donor free, receiver max); upstream transfers cap a non-last receiver at an equal share (`budget.transfer_capacity`).
-- `free = cap − max(min_cap, used)`; used includes deferred (fan-out parent) memory, running excludes it.
-- Rebalance now runs **once per scheduler wake-up** (top of the `while` loop). The five per-finished-task calls in `pipeline_execution.py` are commented out: they let several transfers happen before any admission (up to K×5% when K tasks finish together, and 2 decisions even for K = 1).
-- Scheduler log table has a `defer GB` column.
-- `eval_runs/` added to `.gitignore`.
+This is the setting of the best dynamic 3S run (`fix4r2_3s_gate`, 2,123.9 s). Do not change it while running the paper evals.
 
-None of this has been run yet.
+Code: `vllm/kalypso/execution/pipeline_execution.py` (`rebalance_stage_capacity`), `vllm/kalypso/controller/stage.py`, `vllm/kalypso/controller/plan.py`.
 
-### Paper
-- Table 3: PFLOP Blocking / Pipeline / Reduction columns (FEVER 6.1%, MEDEC 40.4%, BioDEX 36.6%, NLI 44.3%, 3S TBD).
-- Table 4: per-operator calls / tokens / KV GB / PFLOP.
-- Static 3S: 20/40/40 will be replaced by 45/45/10 (needs run #16 below). Then the best-static margin at line 453 changes (33/33/34 = 2185.7 s is the best remaining unless 45/45/10 wins).
+| part | rule | where |
+|---|---|---|
+| start | every stage gets capacity / n; the last stage gets the remainder | `plan.py`, `equal_share` |
+| when | rebalance at the top of the scheduler loop and after every finished task | `pipeline_execution.py`, `await rebalance_stage_capacity()` (6 calls) |
+| walk | start at the last stage; go to the previous stage while the current one is starving (`waiting < low`, `low = max(1, 0.2 * cap // worst-case task budget)`) | `more_running`, `Stage.is_starving` |
+| asks for memory | stages before the last: its next waiting task does not fit; last stage: its whole waiting queue (next task's budget x waiting) does not fit | `no_free_mem`, `backlog_needs_memory` |
+| who gives (first match) | 1. a starving stage with free memory, searched from the last stage; 2. an earlier stage with free memory gives it to the later stage that asks; 3. a stage the walk did not reach, with free memory; 4. any stage whose next task fits and has free memory | `memory_donor` |
+| how much (chunk) | 5% of capacity / (observed fan-out from this stage to the last stage) | `TRANSFER_QUANTUM = 0.05`, `transfer_quantum` |
+| how often (timer) | after receiving, a stage waits 1 s x (same fan-out factor) before it can receive again | `RECEIVE_WAIT_S = 1.0`, `may_receive` |
+| mode | chunk and timer both on, full fan-out scaling | `TRANSFER_MODE = "mix"`, `FANOUT_ALPHA = 1.0` |
+| fixed | only free memory moves (deferred parents keep theirs until their last child finishes); no capacity cap | `stage_free` in `budget.py` |
 
-### Results so far (old default, commit b9cbed049)
-3S 2043.4 s, BioDEX 571.7 s, NLI 970.1 s. Explicit pinning: NLI 1027.3 / BioDEX 590.1 / 3S 2400.2. No priority: NLI 969.4 / BioDEX 576.3 / 3S 2030.6. Sensitivity (BioDEX / NLI): 0.9 564.7/947.1, 0.8 564.9/945.6, 0.7 564.2/953.7, 0.5 592.6/1011.8. All will be rerun with the new scheduler.
+Typical values on Llama-70B 3S: chunk about 4.1 GB / 1.5 GB / 0.1 GB and wait about 1 s / 2.7 s / 40 s for stages 3 / 2 / 1.
+Logging: `REBALANCE_LOG = True` in `budget.py`; each `[sched]` table row shows used/cap, waiting, running, deferred GB and `SATURATED`/`STARVING`/`BLOCKED`.
 
-## Open question to check in the gate log
-A downstream stage waiting for children from upstream looks *starving*, so it can be picked as a donor just before its children arrive, then need the memory back. Unverified. Check the 3S gate log for: transfer `donor=<last> receiver=1` followed soon by the last stage SATURATED. Fix only if it shows up and the run is behind (idea: `inflow(s) = running(prev stage)`, starving iff `waiting + inflow < low`).
+Alternative that was tried (commit `a66336e6a`): memory-based states (starving = free memory fits a task and the queue cannot fill it). 2,298.8 s, but it ran while another user's CPU jobs were on the node (see 3), so it is not a fair comparison with 2,123.9 s. Not used for the paper runs.
 
-## Data and vector databases (FEVER Wikipedia, BioDEX)
+## 2. Results so far (Llama-3.3-70B, TP 4, gpu-mem 0.6, KV-metrics server, node a0008)
+
+All rows are in `eval_scripts/results_snapshot_20261008.tsv` (copy of `eval_runs/results.tsv`). Stats per run: `~/projects/semops-experiments/results/2026-10-01_budgetfix_ablations/stats/<run>_{query_kv,op_tokens}.json`.
+
+| run name | workload / config | time (s) | valid? |
+|---|---|---|---|
+| fix4r2_3s_gate | 3S, fix-4 dynamic | 2123.9 | yes (no other load on the node) |
+| memstate3_3s | 3S, memory-based states | 2298.8 | under CPU load |
+| static3_0.2_0.4_0.4_3s_a0008 | 3S, static 20/40/40 | 2487.7 | under CPU load (same split was ~2120 s without load) |
+| ns_biodex_default | BioDEX default | 2065.2 | NO: vector service ran on CPU; rerun |
+| ns_nli_default | NLI default | 1019.7 | under CPU load (old paper number 970.1) |
+| ns_biodex_nopri | BioDEX, no priority | 589.6 | under CPU load (old 576.3) |
+| qwen32b_static204040_3s | Qwen2.5-32B 3S, static 20/40/40 | 1098.2 | yes |
+| qwen32b_dyn_3s | Qwen2.5-32B 3S, fix-4 dynamic | stopped at 10.5 min | partial |
+
+Older reference numbers (paper, before this work): 3S 2043.4 (old adaptive, a0004), static 3S 20/40/40 2117.0 / 33/33/34 2185.7 / 10/30/60 2194.7 / 10/60/30 2197.1 (a0017), BioDEX 571.7, NLI 970.1.
+
+## 3. Things that went wrong (avoid them)
+
+1. **Other users on the node.** From 00:00 on 2026-10-08 another user's 3 CPU jobs (`train_sac.py`) ran on a0008 and slowed every run by 10-17%. Before each run check `ps -eo user,pcpu,args --sort=-pcpu | head`; if other users' jobs use CPU, note it in the run's config text or wait.
+2. **BioDEX vector service on CPU** makes BioDEX ~3.6x slower (vLLM idles while the client waits). Always run it on GPU 0 (command in 5.4).
+3. **Killing the server.** `kill` on the API server pid can leave `VLLM::EngineCore` / `VLLM::Worker_TP*` alive holding GPUs. Kill by process title: `ps -eo pid,args | awk '$2 ~ /^VLLM::/'` (keep the 8B helper's EngineCore if FEVER needs it). Never `pkill -f` a pattern that appears in your own command line.
+4. **Switching branches** between `scheduler-fix-3` and `-4` deletes `vllm/vllm_flash_attn/__init__.py` and `flash_attn_interface.py`. Restore: `cp ~/kalypso/.deps/vllm-flash-attn-src/vllm_flash_attn/*.py ~/kalypso/vllm/vllm_flash_attn/`.
+5. **Do not stop runs early.** Let every run finish; token-curve comparisons in the first 10 min were misleading several times.
+6. **The job allocation ends.** The a0008 job ended at about 03:51 and killed the queue mid-run (3S no-priority at 12 min). Check the job time limit before starting a long queue.
+
+## 4. What is left (in order)
+
+`eval_scripts/paper_queue.sh` contains exactly these runs; each does server restart, warmup, run to completion, record:
+
+| # | run name | workload | config |
+|---|---|---|---|
+| 1 | ns_3s_nopri | 3S | priority off |
+| 2 | ns_nli_nopri | NLI | priority off |
+| 3 | ns_biodex_pin | BioDEX | explicit pinning (virtual off) |
+| 4 | ns_3s_pin | 3S | explicit pinning |
+| 5 | ns_nli_pin | NLI | explicit pinning |
+| 6-13 | ns_{biodex,nli}_mem{0.9,0.8,0.7,0.5} | BioDEX, NLI | gpu-memory-utilization 0.9 / 0.8 / 0.7 / 0.5 |
+| 14 | ns_3s_blocking | 3S | blocking client |
+| 15 | ns_biodex_default_gpuvec | BioDEX | default (rerun; vector service on GPU) |
+| 16-19 | static3_{0.33_0.33_0.34, 0.1_0.3_0.6, 0.1_0.6_0.3, 0.4_0.4_0.2}_3s_a0008 | 3S | static splits |
+
+Total about 10 h. Not in the queue: MEDEC (check whether rebalancing fires; old number 502.6), FEVER (needs the ColBERT index, see 6).
+Paper updates after the runs: Section 4 algorithm text (section 1 above), Fig. 7, Tables 3/4, ablation ranges, sensitivity figure, abstract.
+
+## 5. Exact steps on a new GPU node
+
+### 5.1 Code and scripts
+```bash
+cd ~/kalypso && git fetch kalypso && git checkout scheduler-fix-4 && git log --oneline -1   # 0d5ae7766 or later
+ls vllm/vllm_flash_attn/*.py || cp .deps/vllm-flash-attn-src/vllm_flash_attn/*.py vllm/vllm_flash_attn/
+mkdir -p eval_runs && cp eval_scripts/* eval_runs/          # eval_runs/ is gitignored; scripts expect it
+mkdir -p ~/projects/semops-experiments/results/2026-10-01_budgetfix_ablations/{metrics,client,stats}
+```
+The server uses the existing build (vLLM 0.1.dev12361, `.so` files from 2026-08-19) and env `~/.conda/envs/py312`.
+
+### 5.2 Data (symlinks; `semops-experiments/data/` is otherwise empty)
+```bash
+D=~/projects/semops-experiments/data; K=~/kalypso/vllm/kalypso/benchmark
+mkdir -p $D/contract-nli
+ln -sfn $K/data/contract-nli/contracts $D/contract-nli/contracts
+ln -sfn $K/data/contract-nli/hypotheses $D/contract-nli/hypotheses
+ln -sfn $K/sample_data/contract-nli/obligation-categories $D/contract-nli/obligation-categories
+ln -sfn $K/data/biodex/articles_500 $D/articles_500
+ln -sfn $K/data/biodex/reactions $D/reactions
+ln -sfn $K/data/medec/MEDEC-TrainingSet-1000.csv $D/MEDEC-Full-TrainingSet-agreement-balanced-1000-with-ErrorType.csv
+ln -sfn $K/data/fever/fever_claims_sample_1000_data.csv $D/fever_claims_sample_1000_data.csv
+```
+Check: a 3S run sends ~48,400 requests and ~124.8M prompt tokens (same as the reference runs).
+
+### 5.3 tmux sessions
+```bash
+tmux new -s vllm   -d      # server
+tmux new -s vllm2  -d      # client
+tmux new -s lotus  -d      # warmup
+tmux send-keys -t vllm2 'conda activate ~/.conda/envs/py312 && cd ~/projects/semops-experiments/pipelines/qllm' Enter
+tmux send-keys -t lotus 'cd ~/projects/semops-experiments/pipelines/lotus' Enter
+```
+The base env has no pandas: warmup and clients must use `~/.conda/envs/py312` (the queue does this).
+
+### 5.4 BioDEX vector service (port 8080, GPU 0)
+```bash
+(CUDA_VISIBLE_DEVICES=0 HF_HOME=/scratch/hojaeson_umass/datasets nohup ~/.conda/envs/py312/bin/python -u \
+  ~/kalypso/vllm/kalypso/icp/vector_service.py --host 127.0.0.1 --port 8080 \
+  > /scratch/hojaeson_umass/logs/vector_service_biodex_gpu.log 2>&1 &)
+curl -fsS localhost:8080/health      # {"status":"ok","backend":"faiss"}
+```
+The 70B server uses GPUs 1-4 (`CUDA_VISIBLE_DEVICES=1,2,3,4` in `~/launch_vllm_py312_kvmetrics.sh`), so GPU 0 is free for this.
+
+### 5.5 Run the queue
+```bash
+ps -eo user,pcpu,args --sort=-pcpu | head      # no other users' CPU-heavy jobs?
+~/kalypso/eval_runs/paper_queue.sh > ~/kalypso/eval_runs/paper_queue.log 2>&1 &
+tail -f ~/kalypso/eval_runs/paper_queue.log      # one "[name] DONE Total request time: ..." line per run
+```
+What one run does (`run` in `paper_queue.sh`): set `cfg.py priority/virtual`, kill the old server by process title, start `~/launch_vllm_py312_kvmetrics.sh` in tmux `vllm` with `VLLM_GPU_MEMORY_UTILIZATION`, wait for `/health`, restore the defaults on disk, 40 s Lotus MEDEC warmup in tmux `lotus`, wait for 0 running requests, start the client in tmux `vllm2` (`start_run.sh`), wait for it to exit, save metrics, `record_run.sh` (row in `eval_runs/results.tsv` + stats JSON).
+Static splits (`static3` in the queue) insert a fixed-fraction block into `plan.py` before the server starts and restore `plan.py` (from `eval_runs/plan_current_backup.py`) right after it loads.
+
+### 5.6 Watch a run
+```bash
+python3 ~/kalypso/eval_runs/sched_table.py <server_log> "<start YYYY-MM-DD HH:MM:SS>" 60   # per-minute stage caps/queues
+~/kalypso/eval_runs/watch_vs_ref.sh <run> <client_pid> "<start>" ref_fix4r2_3s.json fix4 124.8 2123.9   # 3S tokens vs fix-4
+```
+Start time = mtime of `results/.../metrics/<run>_before.txt`.
+
+## 6. Reference: data and vector databases
 
 **Data location (checked 2026-10-06):** BioDEX / ContractNLI / MEDEC / FEVER-claims data are in `~/kalypso/vllm/kalypso/benchmark/data/` (`biodex/{articles_500 (500), reactions (11,271)}`, `contract-nli/`, `medec/`, `fever/fever_claims_sample_1000_data.csv`, plus `.zip` copies). `~/projects/semops-experiments/data/` and `pipelines/lotus/logs/` are empty (emptied 2026-10-02 18:47–18:50); `/scratch/hojaeson_umass/backup/semops-experiments/` has only the directory tree. Point clients at the kalypso copy, e.g. `BIODEX_ARTICLE_DIR=~/kalypso/vllm/kalypso/benchmark/data/biodex/articles_500 BIODEX_REACTION_DIR=~/kalypso/vllm/kalypso/benchmark/data/biodex/reactions`, or symlink it into `semops-experiments/data/`.
 
@@ -47,13 +148,13 @@ Needed by the clients (`PROJECT_ROOT = ~/projects/semops-experiments`):
 | FEVER corpus | `data/beir_fever_corpus_data.csv` | only to build the ColBERT index |
 | FEVER index | `pipelines/lotus/logs/colbert_indexes/{collections/wikipedia.tsv, wikipedia/indexes/fever_factool_wikipedia_colbert/}` | read by `vector_service.py --backend colbert` |
 
-### BioDEX: nothing to prebuild
+#### BioDEX: nothing to prebuild
 `vector_service.py` without `--backend` uses FAISS (`IndexFlatIP`, model `intfloat/e5-base-v2`). The BioDEX client calls `POST /build_index` with the reaction table at the start of each run, and the index is built in memory. You only need `data/reactions/`, plus the e5 model in `HF_HOME` (downloaded on first use).
 ```bash
-CUDA_VISIBLE_DEVICES= $PY -u ~/kalypso/vllm/kalypso/icp/vector_service.py --host 127.0.0.1 --port 8080
+CUDA_VISIBLE_DEVICES=0 HF_HOME=/scratch/hojaeson_umass/datasets ~/.conda/envs/py312/bin/python -u ~/kalypso/vllm/kalypso/icp/vector_service.py --host 127.0.0.1 --port 8080   # GPU 0, NOT CPU
 ```
 
-### FEVER: build the ColBERT Wikipedia index once
+#### FEVER: build the ColBERT Wikipedia index once
 Script: `~/projects/semops-experiments/pipelines/lotus/colbert_test.py`. It writes `collections/wikipedia.tsv` from the corpus CSV (text column `data`), then runs ColBERT `Indexer`. ColBERT source: `~/projects/semops-experiments/projects/ColBERT`.
 The settings of the original build (from its `plan.json`): checkpoint `colbert-ir/colbertv2.0`, nbits 2, doc_maxlen 180, kmeans_niters 20, nranks 1, experiment `wikipedia`, index name `fever_factool_wikipedia_colbert`. Size: about 5.4M passages, 442M embeddings, 217 chunks, 262,144 partitions, so expect hours on one GPU.
 ```bash
@@ -78,109 +179,15 @@ curl -fsS localhost:8080/health
 ```
 FEVER also needs the 8B cascade helper on 8004 (`bash ~/launch_vllm_py312_8b.sh`).
 
-## Runs
+## 7. Clients (tmux `vllm2`, dir `pipelines/qllm`)
 
-| # | Phase | Run | Workload | Paper target | Status |
-|---|---|---|---|---|---|
-| 1 | 1 Gate | New default, 20 min vs `ref_newdefault_3s.json` | 3S | go / no-go | pending |
-| 2 | 1 | New default, full | 3S | Fig. 7, Fig. 14 (rebalancing + defer GB), Table 3 pipeline, Table 4 3S rows | pending |
-| 3 | 2 Defaults | New default | NLI | Fig. 7, speedups, abstract, Table 3/4 | pending |
-| 4 | 2 | New default | BioDEX | Fig. 7, speedups, abstract, Table 3/4 | pending |
-| 5 | 3 Ablations | No priority (`cfg.py priority off`) | NLI | ablation text/ranges | pending |
-| 6 | 3 | No priority | BioDEX | ablation text/ranges | pending |
-| 7 | 3 | No priority | 3S | ablation text/ranges | pending |
-| 8 | 3 | Explicit pinning (`cfg.py virtual off`) | NLI | ablation text/ranges | pending |
-| 9 | 3 | Explicit pinning | BioDEX | ablation text/ranges | pending |
-| 10 | 3 | Explicit pinning | 3S | ablation text/ranges | pending |
-| 11 | 3 | Sensitivity 0.9 | NLI, BioDEX | sensitivity fig/text | pending |
-| 12 | 3 | Sensitivity 0.8 | NLI, BioDEX | sensitivity fig/text | pending |
-| 13 | 3 | Sensitivity 0.7 | NLI, BioDEX | sensitivity fig/text | pending |
-| 14 | 3 | Sensitivity 0.5 | NLI, BioDEX | sensitivity fig/text | pending |
-| 15 | 3 | Blocking (`client_contract_nli_multistage_blocking.py`) | 3S | Table 3 blocking miss/hit/evict/PFLOP + Reduction | pending |
-| 16 | 3 | Static 45/45/10 (`cfg.py plan3 0.45 0.45 0.1`), replaces 20/40/40 | 3S | Fig. 7 static panel, best-static margin (line 453) | pending |
-| 17 | — | Does rebalancing fire? (grep `transfer` in sched log); rerun if yes | FEVER, MEDEC | Table 3, Fig. 7 | check |
-
-Unchanged (no rerun): static 2-stage splits, other static 3S splits, blocking runs except 3S.
-On hold: node check (a0004 vs a0017).
-
-## Paper text
-
-| # | Item | Status |
-|---|---|---|
-| T1 | Section 4: new algorithm (MORE_RUNNING / PICK_DONOR), β = 0.2, α removed | pending |
-| T2 | Recompute derived numbers: abstract ×, ablation ranges, KV %, PFLOP reduction | pending (after 3–14) |
-| T3 | Line 438 note + Fig. 7 3S labels for 45/45/10 | pending (after 16) |
-
-
-## How to run
-
-### Rules
-- Order inside a phase: NLI → BioDEX → 3S (3S last). Never run the same dataset back to back on one server (NLI and 3S share the contract data).
-- Every run on the KV-metrics server (`~/launch_vllm_py312_kvmetrics.sh`), including blocking runs.
-- Config switches (`cfg.py`) are read at server start → restart after each change, reset to defaults afterwards (`cfg.py priority on`, `cfg.py virtual on`, `cfg.py plan reset`).
-- One run per config.
-
-### 1. Server (tmux `vllm`)
-```bash
-L=~/projects/semops-experiments/pipelines/qllm/logs; T=$(date +%Y%m%d-%H%M%S)
-bash ~/launch_vllm_py312_kvmetrics.sh 2>&1 | tee $L/server_vllm_$(hostname -s)_<tag>_$T.log
-# sensitivity: VLLM_GPU_MEMORY_UTILIZATION=0.8 bash ~/launch_vllm_py312_kvmetrics.sh ...
-```
-Uses GPUs 1–4 (`CUDA_VISIBLE_DEVICES=1,2,3,4`), port 8003. If Ctrl-C doesn't stop it: `pkill -f vllm.entrypoints` (then `kill -9`).
-
-### 2. Warmup (tmux `lotus`, dir `pipelines/lotus`)
-```bash
-python3 medec_filter_map_map.py      # 40 s, then Ctrl-C until it exits
-# if the next run is MEDEC, warm up with: python3 contract_nli_filter_join_map.py
-```
-Wait for 0 running requests: `curl -s localhost:8003/metrics | grep ^vllm:num_requests_running`.
-Do not use Lotus `biodex.py` (too slow).
-
-### 3. Vector service (port 8080) — needed for FEVER and BioDEX only
-Script: `~/kalypso/vllm/kalypso/icp/vector_service.py`. Only one service can use port 8080, so restart it when switching between FEVER and BioDEX.
-```bash
-PY=/scratch/hojaeson_umass/miniforge3/envs/rtx/bin/python
-pkill -f "vector_service.py.*--port 8080"
-# BioDEX (faiss, default backend)
-CUDA_VISIBLE_DEVICES= $PY -u ~/kalypso/vllm/kalypso/icp/vector_service.py --host 127.0.0.1 --port 8080
-# FEVER (ColBERT Wikipedia index)
-CUDA_VISIBLE_DEVICES= $PY -u ~/kalypso/vllm/kalypso/icp/vector_service.py --host 127.0.0.1 --port 8080 --backend colbert
-curl -fsS localhost:8080/health   # ready check
-```
-ColBERT needs `CUDA_HOME` (cuda/13.1.1 module) for its extension build; see `~/exp_factool.sh` for the full env setup.
-
-### 4. FEVER cascade helper (8B, port 8004, GPU 0)
-```bash
-bash ~/launch_vllm_py312_8b.sh     # VLLM_8B_CUDA_VISIBLE_DEVICES=0 by default
-```
-FEVER client: `client_fever_factool_map_search_filter_cascade.py` (thresholds 0.7/0.9).
-
-### 5. Client (tmux `vllm2`, dir `pipelines/qllm`)
-```bash
-~/kalypso/eval_runs/start_run.sh <run_name> <client.py>    # prints start time + pid
-pgrep -f '^python3 -u <client.py>'                           # confirm it is running
-```
-| Workload | Client |
+| workload | client |
 |---|---|
 | NLI | `client_contract_nli_filter_join_map.py` |
 | BioDEX | `client_biodex_map_icp.py` |
 | 3S | `client_contract_nli_multistage.py` |
 | 3S blocking | `client_contract_nli_multistage_blocking.py` |
-| FEVER | `client_fever_factool_map_search_filter_cascade.py` |
 | MEDEC | `client_medec_filter_map_map.py` |
+| FEVER | `client_fever_factool_map_search_filter_cascade.py` (needs the 8B helper on 8004: `bash ~/launch_vllm_py312_8b.sh`) |
 
-### 6. Monitor
-```bash
-~/kalypso/eval_runs/watch_vs_ref.sh <run_name> <pid> "<start>" ref_newdefault_3s.json "old default" <expected_tokens_M> 2043.4
-python3 ~/kalypso/eval_runs/sched_view.py <server_log>
-python3 ~/kalypso/eval_runs/sched_compare.py <server_log> "<start>" 40
-```
-Gate rule: if behind the reference at ~10 min, stop, analyze the sched log, fix, retest.
-
-### 7. Record
-```bash
-A=~/projects/semops-experiments/results/2026-10-01_budgetfix_ablations
-curl -s localhost:8003/metrics | grep -E "^vllm:(request_success_total|prompt_tokens_total|generation_tokens_total|num_preemptions_total)" > $A/metrics/<run_name>_after.txt
-~/kalypso/eval_runs/record_run.sh <run_name> "<config text>" <server_log>
-```
-Saves a `results.tsv` row, client log, `stats/<run>_query_kv.json` (miss/hit/decode/evictions) and `stats/<run>_op_tokens.json` (per-op). Check that the printed eviction metric says `on`.
+Other models: add `--model-name <hf id>` to the client and the warmup, and `VLLM_MODEL_NAME=<hf id>` to the server launch (see `eval_runs/run_qwen_3s.sh` for Qwen2.5-32B).
