@@ -115,7 +115,7 @@ curl -fsS localhost:8080/health      # {"status":"ok","backend":"faiss"}
 ```
 The 70B server uses GPUs 1-4 (`CUDA_VISIBLE_DEVICES=1,2,3,4` in `~/launch_vllm_py312_kvmetrics.sh`), so GPU 0 is free for this.
 
-### 5.5 Run the queue
+### 5.5 Run the queue (or do 5.1-5.5 in one step: `~/kalypso/eval_scripts/start_queue_on_node.sh`)
 ```bash
 ps -eo user,pcpu,args --sort=-pcpu | head      # no other users' CPU-heavy jobs?
 ~/kalypso/eval_runs/paper_queue.sh > ~/kalypso/eval_runs/paper_queue.log 2>&1 &

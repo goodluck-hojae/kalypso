@@ -1,6 +1,6 @@
 #!/bin/bash
 # Paper eval queue on a0008 with the frozen scheduler (commit 0d5ae7766, fix4r2 states).
-Each run: config switch, server restart,
+# Each run: config switch, server restart,
 # Lotus MEDEC warmup (40 s), client run to completion, record (results.tsv + stats).
 E=~/kalypso/eval_runs
 L=~/projects/semops-experiments/pipelines/qllm/logs
@@ -86,6 +86,8 @@ run ns_nli_mem0.5          nli         0.5 on  on
 
 # BioDEX default again: the first try (2,065 s) had the vector service on CPU
 run ns_biodex_default_gpuvec biodex 0.6 on on
+run ns_nli_default_a0007   nli    0.6 on  on
+run ns_biodex_nopri_a0007  biodex 0.6 off on
 
 # Remaining 3S static splits (moved to the end: long runs)
 static3 0.33 0.33 0.34
