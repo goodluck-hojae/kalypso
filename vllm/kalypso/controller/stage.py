@@ -24,9 +24,8 @@ class Task:
 
 
 class Stage:
-    # Memory-based states (task_size = memory one task of this stage reserves):
-    #   saturated: the waiting tasks need more memory than is free
-    #   starving:  free memory fits at least one task, and the waiting tasks cannot fill it
+    # beta: low = beta * cap / min_budget. A stage is saturated if waiting >= low,
+    # starving otherwise.
     LOW_THRESHOLD_RATIO = 0.2
 
     def __init__(
@@ -84,25 +83,11 @@ class Stage:
     def running_count(self) -> int:
         return len(self.running_tasks)
 
-    def task_size(self) -> int:
-        head = self.peek_task()
-        if head is not None:
-            return max(1, self.estimate_budget(head))
-        if self.running_tasks:
-            return max(1, sum(self.running_tasks.values()) // len(self.running_tasks))
-        manager = KVMemoryManager.get_instance()
-        return max(1, int(manager._stage_min_capacity.get(self.stage_id, 0)), int(self.bytes_per_token))
-
-    def free_memory(self) -> int:
-        used, cap = KVMemoryManager.get_instance().stage_usage(self.stage_id)
-        return max(0, int(cap - used))
-
     def is_saturated(self) -> bool:
-        return self.ready_count() * self.task_size() > self.free_memory()
+        return self.ready_count() >= self.low_threshold
 
     def is_starving(self) -> bool:
-        size, free = self.task_size(), self.free_memory()
-        return free >= size and self.ready_count() * size < free
+        return self.ready_count() < self.low_threshold
 
     def tune_thresholds(self):
         manager = KVMemoryManager.get_instance()
