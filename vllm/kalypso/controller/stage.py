@@ -24,9 +24,8 @@ class Task:
 
 
 class Stage:
-    # beta: low = beta * cap / min_budget. A stage is busy if running >= low,
-    # saturated if running < low and waiting >= low, starving otherwise.
     LOW_THRESHOLD_RATIO = 0.2
+    STATE_MARGIN_RATIO = 0.1
 
     def __init__(
         self,
@@ -83,14 +82,31 @@ class Stage:
     def running_count(self) -> int:
         return len(self.running_tasks)
 
-    def is_busy(self) -> bool:
-        return self.running_count() >= self.low_threshold
+    def task_size(self) -> int:
+        head = self.peek_task()
+        if head is not None:
+            return max(1, self.estimate_budget(head))
+        if self.running_tasks:
+            return max(1, sum(self.running_tasks.values()) // len(self.running_tasks))
+        manager = KVMemoryManager.get_instance()
+        return max(1, int(manager._stage_min_capacity.get(self.stage_id, 0)), int(self.bytes_per_token))
+
+    def free_memory(self) -> int:
+        used, cap = KVMemoryManager.get_instance().stage_usage(self.stage_id)
+        return max(0, int(cap - used))
+
+    def _demand_free_margin(self):
+        used, cap = KVMemoryManager.get_instance().stage_usage(self.stage_id)
+        demand = self.ready_count() * self.task_size()
+        return demand, max(0, int(cap - used)), self.STATE_MARGIN_RATIO * cap
 
     def is_saturated(self) -> bool:
-        return not self.is_busy() and self.ready_count() >= self.low_threshold
+        demand, free, margin = self._demand_free_margin()
+        return demand - free >= margin
 
     def is_starving(self) -> bool:
-        return not self.is_busy() and self.ready_count() < self.low_threshold
+        demand, free, margin = self._demand_free_margin()
+        return free - demand >= margin
 
     def tune_thresholds(self):
         manager = KVMemoryManager.get_instance()
