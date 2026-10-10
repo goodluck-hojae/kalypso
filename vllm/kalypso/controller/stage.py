@@ -24,11 +24,6 @@ class Task:
 
 
 class Stage:
-    # Memory-based states with a middle band. demand = waiting tasks x task_size,
-    # margin = STATE_MARGIN_RATIO x this stage's current cap:
-    #   saturated: demand exceeds free memory by at least margin (asks for memory)
-    #   starving:  free memory exceeds demand by at least margin (may give memory)
-    #   balanced:  otherwise (neither)
     LOW_THRESHOLD_RATIO = 0.2
     STATE_MARGIN_RATIO = 0.1
 

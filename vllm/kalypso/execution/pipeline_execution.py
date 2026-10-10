@@ -150,17 +150,11 @@ class AsyncPipelineExecutor:
     # Pipeline-only ablation: submit every ready task directly to vLLM and let
     # vLLM perform its own queueing, preemption, and KV-cache management.
     MEMORY_ADMISSION_CONTROL = True
-    # Share of capacity moved per transfer to the last stage; earlier stages move
-    # this divided by the expected fan-out down to the last stage.
     TRANSFER_QUANTUM = 0.05
-    # "chunk": transfers to earlier stages are smaller (QUANTUM / fan-out down to the
-    # last stage). "timer": every transfer is QUANTUM, but after receiving memory a
-    # stage waits RECEIVE_WAIT_S x fan-out down to the last stage before receiving again.
-    # "mix": both.
     TRANSFER_MODE = "mix"
     RECEIVE_WAIT_S = 1.0
-    # Softens the fan-out scaling of chunks and waits: factor = fan-out ** ALPHA.
     FANOUT_ALPHA = 1.0
+    RUNNING_K = 64
 
     def __init__(self):
         self.manager = KVMemoryManager.get_instance()
@@ -189,7 +183,7 @@ class AsyncPipelineExecutor:
         total_retries = 0
 
         last_receive_at = {}
-        pending_moves = []  # transfers since the last [sched] table, e.g. "3->2 4.1GB"
+        pending_moves = []
 
         def add_deferred_parent(stage_id: int, reserved_budget: int) -> None:
             deferred_parent_counts[stage_id] = (
@@ -226,8 +220,6 @@ class AsyncPipelineExecutor:
             # [sched] 08:03:11 finish task=12 stage=2
             # stage   used/cap GB  wait   run
             #     1   25.7/25.8     325     3  FULL
-            # defer GB = memory held by deferred tasks; SATURATED / STARVING / BALANCED =
-            # Stage states (memory-based); BLOCKED = its next waiting task does not fit.
             lines = [
                 f"[sched] {time.strftime('%H:%M:%S')} {event}"
                 + (f" | moves {', '.join(pending_moves)}" if pending_moves else ""),
@@ -305,7 +297,6 @@ class AsyncPipelineExecutor:
                 return used + stage.estimate_budget(head) > cap
 
             def backlog_needs_memory(stage):
-                # The waiting tasks (head's budget as the per-task estimate) do not fit.
                 head = stage.peek_task()
                 if head is None:
                     return False
@@ -315,8 +306,6 @@ class AsyncPipelineExecutor:
             asked = set()
 
             def memory_donor(receiver):
-                # 1st: a starving stage (few waiting, next task fits) with free
-                # memory, searched from the last stage.
                 for st in reversed(stages):
                     if (
                         st is not receiver
@@ -325,8 +314,6 @@ class AsyncPipelineExecutor:
                         and self.manager.stage_free(st.stage_id) > 0
                     ):
                         return st
-                # 2nd: an earlier stage gives its free memory to a later stage first,
-                # before it admits more of its own tasks.
                 for st in stages[:stages.index(receiver)]:
                     if self.manager.stage_free(st.stage_id) > 0:
                         return st
@@ -347,7 +334,6 @@ class AsyncPipelineExecutor:
                 return candidates[0] if candidates else None
 
             def fanout(stage):
-                # Children per input task: observed so far, else the join table size.
                 stat = stage_stat.get(stage.stage_id)
                 if stat and stat["input"] > 0 and stat["output"] > 0:
                     return max(1.0, stat["output"] / stat["input"])
@@ -355,7 +341,6 @@ class AsyncPipelineExecutor:
                 return float(max(1, len(table))) if table else 1.0
 
             def fanout_to_last(idx):
-                # Expected children in the last stage per task of stage idx.
                 factor = 1.0
                 for st in stages[idx:-1]:
                     factor *= fanout(st)
@@ -379,12 +364,9 @@ class AsyncPipelineExecutor:
                 stage = stages[idx]
                 asked.add(stage.stage_id)
                 moved = False
-                if stage.is_starving():
+                if stage.ready_count() < stage.low_threshold:
                     moved = await more_running(idx - 1)
-                # Every stage asks for memory when it is saturated: its waiting queue
-                # needs more than its free memory by at least the margin (Stage.is_saturated).
-                needs_memory = stage.is_saturated()
-                if needs_memory and may_receive(idx):
+                if no_free_mem(stage) and may_receive(idx):
                     donor = memory_donor(stage)
                     _, cap_before = self.manager.stage_usage(stage.stage_id) if donor is not None else (0, 0)
                     if donor is not None and await self.manager.transfer_capacity(
@@ -401,6 +383,8 @@ class AsyncPipelineExecutor:
                         moved = True
                 return moved
 
+            if stages[-1].running_count() >= self.RUNNING_K:
+                return
             changed = await more_running(len(stages) - 1)
 
             if changed:

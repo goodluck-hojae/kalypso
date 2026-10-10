@@ -146,8 +146,6 @@ class SemanticPlan:
             #         )
             elif num_stages > 1:
                 total_capacity = kv.capacity()
-                # Start every stage at an equal share (at least its minimum); the
-                # last stage takes the remainder.
                 equal_share = total_capacity / num_stages
                 assigned_caps = {
                     sid: max(equal_share, stage_min_caps.get(sid, 0))
