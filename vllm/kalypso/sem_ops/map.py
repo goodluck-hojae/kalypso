@@ -116,7 +116,7 @@ class SemMap(BaseOp):
                         await executor.unpin(raw_request, previous_pin_req_id)
                     ctx.state.pin_req_id = None
                 ctx.state.retry_op_position = self.position
-                ctx.state.retry_max_tokens = SemMap.MAX_TOKEN_LIMIT
+                ctx.state.retry_max_tokens = min(2 * max_tokens, SemMap.MAX_TOKEN_LIMIT)
                 if self.LOG_RETRY_TRACE:
                     print(
                         "[sem-map] "
@@ -135,7 +135,7 @@ class SemMap(BaseOp):
                         f"position={self.position} "
                         f"request_id={output.request_id} "
                         f"from_max_tokens={max_tokens} "
-                        f"to_max_tokens={SemMap.MAX_TOKEN_LIMIT}"
+                        f"to_max_tokens={ctx.state.retry_max_tokens}"
                     )
                 return RETRY_TASK
 
