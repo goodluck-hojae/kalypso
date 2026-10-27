@@ -1,3 +1,4 @@
+from vllm.kalypso import op_usage
 from vllm.kalypso.sem_ops import ops
 from vllm.kalypso.budget import KVMemoryManager
 
@@ -55,7 +56,11 @@ class SemanticPipeline:
         next = True
         for idx, op in enumerate(self.ops):
             if next:
-                next = await op(self.ctx, priority=-idx)
+                token = op_usage.current_op.set(op_usage.op_label(op, self.stage_id, idx))
+                try:
+                    next = await op(self.ctx, priority=-idx)
+                finally:
+                    op_usage.current_op.reset(token)
 
                 if next is False:
                     return None

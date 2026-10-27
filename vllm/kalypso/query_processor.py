@@ -1,3 +1,4 @@
+import os
 import asyncio
 import json
 from pathlib import Path
@@ -8,6 +9,7 @@ from prometheus_client import REGISTRY
 
 from vllm.kalypso.budget import KVMemoryManager
 from vllm.kalypso.query import Query
+from vllm.kalypso import op_usage
 from vllm.kalypso.controller import SemanticPlan
 from vllm.kalypso.execution.vllm_executor import VLLMExecutor
 from vllm.kalypso.pin_registry import PinnedRequestRegistry
@@ -57,6 +59,14 @@ class QueryProcessor:
         self._last_unpin_at = 0.0
         self._consecutive_stuck_checks = 0
         self._consecutive_timeout_checks = 0
+
+    @staticmethod
+    async def _prefill_tokens_scheduled(raw_request):
+        try:
+            engine = raw_request.app.state.engine_client
+            return await engine.engine_core.call_utility_async("get_prefill_tokens_scheduled")
+        except Exception:
+            return None
 
     @classmethod
     def _kv_metric_snapshot(cls) -> dict[str, float]:
@@ -179,18 +189,61 @@ class QueryProcessor:
         query_id = f"query-{uuid4().hex}"
         started_at = monotonic()
         kv_before = self._kv_metric_snapshot()
+        started_before = await self._prefill_tokens_scheduled(raw_request)
+        op_usage.snapshot_and_reset()
         # Each query registers its own stages; drop those of earlier queries so
         # they neither hold capacity nor act as donors/receivers.
-        KVMemoryManager.get_instance().reset_stages()
+        share = float(os.environ.get("KALYPSO_QUERY_SHARE", "0") or 0)
+        _share_file = "/home/hojaeson_umass/kalypso/eval_runs/query_share_" + __import__("socket").gethostname().split(".")[0]
+        if share <= 0 and os.path.exists(_share_file):  # set by client_multiquery.py for multi-query runs only
+            try:
+                share = float(open(_share_file).read().strip() or 0)
+            except ValueError:
+                share = 0.0
+        mq_tokens = None
+        if share > 0:
+            # Multi-query mode: this query gets its own budget (share of the KV capacity), stages and
+            # output-length estimator, so overlapping queries do not reset or overwrite each other's state.
+            from vllm.kalypso.budget import _QUERY_KV_MANAGER
+            from vllm.kalypso.controller.map_estimator import _QUERY_ESTIMATOR, MapRatioEstimator
+            # Opt-in admission settings, e.g. "real=0.85" / "pct=50,margin=1.0" / "pool=0.25" (default: none).
+            admit = {}
+            _admit_file = _share_file.replace("query_share_", "admit_cfg_")
+            if os.path.exists(_admit_file):
+                for kv in open(_admit_file).read().replace("\n", ",").split(","):
+                    if "=" in kv:
+                        k, v = kv.split("=", 1)
+                        admit[k.strip()] = float(v)
+            if admit.get("live", 0.0) > 0:
+                from vllm.kalypso import budget as _budget
+                _budget._ENGINE["client"] = raw_request.app.state.engine_client
+            mq_manager = KVMemoryManager.fork_for_query(
+                share, pool_min=admit.get("pool", 0.0), real_admit=admit.get("real", 0.0),
+                live_admit=admit.get("live", 0.0))
+            mq_estimator = MapRatioEstimator()
+            mq_estimator.percentile = admit.get("pct", MapRatioEstimator.percentile)
+            mq_estimator.margin = admit.get("margin", MapRatioEstimator.margin)
+            if admit:
+                print(f"[kalypso-admit] query settings {admit}", flush=True)
+            mq_tokens = (_QUERY_KV_MANAGER.set(mq_manager), _QUERY_ESTIMATOR.set(mq_estimator))
+        else:
+            KVMemoryManager.get_instance().reset_stages()
         try:
             return await plan.execute(raw_request, query)
         finally:
+            if mq_tokens is not None:
+                _QUERY_KV_MANAGER.reset(mq_tokens[0]); _QUERY_ESTIMATOR.reset(mq_tokens[1])
+                mq_manager.leave_pool()
             await self._cleanup_query_pins(raw_request, owner_key)
             if self.LOG_QUERY_KV_STATS:
                 stats = self._query_kv_delta(
                     kv_before,
                     self._kv_metric_snapshot(),
                 )
+                started_after = await self._prefill_tokens_scheduled(raw_request)
+                if started_before is not None and started_after is not None:
+                    # Every start, including recomputation after preemption (vLLM scheduler counter).
+                    stats["prefill_tokens_all_starts"] = started_after - started_before
                 stats.update({
                     "query_id": query_id,
                     "elapsed_seconds": monotonic() - started_at,
@@ -199,6 +252,10 @@ class QueryProcessor:
                 print(
                     "[QueryProcessor] QUERY_KV_STATS "
                     + json.dumps(stats, sort_keys=True)
+                )
+                print(
+                    "[QueryProcessor] OP_TOKEN_STATS "
+                    + json.dumps(op_usage.snapshot_and_reset(), sort_keys=True)
                 )
 
     def start_stuck_monitor(self, engine_client):

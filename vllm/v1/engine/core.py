@@ -178,6 +178,11 @@ class EngineCore:
         self.batch_queue: (
             deque[tuple[Future[ModelRunnerOutput], SchedulerOutput]] | None
         ) = None
+        # Kalypso diagnostics (opt-in): one line per scheduled batch / per wait for a batch result.
+        self._step_log = None
+        if os.environ.get("KALYPSO_STEP_LOG"):
+            self._step_log = open(os.environ["KALYPSO_STEP_LOG"], "a", buffering=1)
+            self._step_log.write("kind,t,num_reqs,num_tokens,queue_len,wait_s\n")
         if self.batch_queue_size > 1:
             logger.info("Batch queue is enabled with size %d", self.batch_queue_size)
             self.batch_queue = deque(maxlen=self.batch_queue_size)
@@ -238,7 +243,9 @@ class EngineCore:
                 # Profiles the peak memory usage of the model to determine how
                 # much memory can be allocated for kv cache.
                 available_gpu_memory = self.model_executor.determine_available_memory()
-                self.available_gpu_memory_for_kv_cache = available_gpu_memory[0]
+                # Kalypso's KV budget: with pipeline parallelism the GPUs hold different layers and
+                # report different free memory; vLLM sizes the cache by the smallest, so use it too.
+                self.available_gpu_memory_for_kv_cache = min(available_gpu_memory)
         else:
             # Attention free models don't need memory for kv cache
             available_gpu_memory = [0] * len(kv_cache_specs)
@@ -336,6 +343,9 @@ class EngineCore:
 
     def get_kv_cache_budget(self):
         return self.available_gpu_memory_for_kv_cache
+
+    def get_prefill_tokens_scheduled(self):
+        return getattr(self.scheduler, "prefill_tokens_scheduled", 0)
     
     @contextmanager
     def log_error_detail(self, scheduler_output: SchedulerOutput):
@@ -363,6 +373,11 @@ class EngineCore:
 
         return callback
 
+    def _log_step(self, kind, so, queue_len, wait_s=0.0):
+        if self._step_log is not None and so is not None:
+            self._step_log.write(f"{kind},{time.time():.4f},{len(so.num_scheduled_tokens)},"
+                                 f"{so.total_num_scheduled_tokens},{queue_len},{wait_s:.4f}\n")
+
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
         """Schedule, execute, and make output.
 
@@ -375,12 +390,15 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule()
+        self._log_step("S", scheduler_output, 0)
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
+        _t0 = time.time()
         with self.log_error_detail(scheduler_output):
             model_output = future.result()
             if model_output is None:
                 model_output = self.model_executor.sample_tokens(grammar_output)
+        self._log_step("W", scheduler_output, 0, time.time() - _t0)
 
         # Before processing the model output, process any aborts that happened
         # during the model execution.
@@ -429,6 +447,7 @@ class EngineCore:
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule()
+            self._log_step("S", scheduler_output, len(batch_queue))
             exec_future = self.model_executor.execute_model(
                 scheduler_output, non_block=True
             )
@@ -475,8 +494,10 @@ class EngineCore:
 
         # Block until the next result is available.
         future, scheduler_output = batch_queue.pop()
+        _t0 = time.time()
         with self.log_error_detail(scheduler_output):
             model_output = future.result()
+        self._log_step("W", scheduler_output, len(batch_queue), time.time() - _t0)
 
         # Before processing the model output, process any aborts that happened
         # during the model execution.

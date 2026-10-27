@@ -1496,9 +1496,10 @@ async def init_app_state(
     per_gpu_budget = await state.engine_client.engine_core.call_utility_async(
         "get_kv_cache_budget"
     )
-    tp_size = (
-        state.engine_client.vllm_config.parallel_config.tensor_parallel_size
-    )
+    # Each GPU holds the KV cache of its layers (pipeline) and heads (tensor), so the total
+    # budget is the per-GPU budget times the number of GPUs (tensor x pipeline parallel size).
+    pc = state.engine_client.vllm_config.parallel_config
+    tp_size = pc.tensor_parallel_size * pc.pipeline_parallel_size
     budget = per_gpu_budget * tp_size
     gib = 1024**3
     logger.info(

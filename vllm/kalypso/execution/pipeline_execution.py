@@ -2,7 +2,8 @@ import asyncio
 # import math
 import time
 
-from vllm.kalypso.budget import KVMemoryManager
+from vllm.kalypso.budget import KVMemoryManager, _ADMIT_ENTRY, drop_admit_entry
+from vllm.kalypso import op_usage
 from vllm.kalypso.context import RetryTaskResult
 from vllm.kalypso.controller.stage import Task
 from vllm.kalypso.sem_ops import OpBehavior, ops
@@ -30,6 +31,7 @@ class PlanExecutor:
                     f"position={item.position} "
                     f"input_tuples={input_count}"
                 )
+                token = op_usage.current_op.set(f"b.{item.position}:{operator_name}")
                 try:
                     ctxs = await item(ctxs)
                 except Exception as exc:
@@ -43,6 +45,8 @@ class PlanExecutor:
                         f"error={type(exc).__name__}"
                     )
                     raise
+                finally:
+                    op_usage.current_op.reset(token)
                 elapsed = time.perf_counter() - started_at
                 print(
                     "[blocking-operator] done "
@@ -146,9 +150,25 @@ class AsyncPipelineExecutor:
     # Pipeline-only ablation: submit every ready task directly to vLLM and let
     # vLLM perform its own queueing, preemption, and KV-cache management.
     MEMORY_ADMISSION_CONTROL = True
+    TRANSFER_QUANTUM = 0.05
+    TRANSFER_MODE = "mix"
+    RECEIVE_WAIT_S = 1.0
+    FANOUT_ALPHA = 1.0
+    # RUNNING_K override for tuning runs: read from eval_runs/running_k_<host> at import (default 64).
+    RUNNING_K = (lambda _p: int(open(_p).read().strip()) if __import__('os').path.exists(_p) else 64)(
+        '/home/hojaeson_umass/kalypso/eval_runs/running_k_' + __import__('socket').gethostname().split('.')[0])
+    print(f'[kalypso] RUNNING_K={RUNNING_K}', flush=True)
+    # BACKLOG_RULE (tuning runs): skip rebalancing only if the last stage has no blocked head task; file eval_runs/backlog_rule_<host>.
+    BACKLOG_RULE = not __import__('os').path.exists('/home/hojaeson_umass/kalypso/eval_runs/backlog_off_' + __import__('socket').gethostname().split('.')[0])  # default ON since 2026-10-12 09:50
+    print(f'[kalypso] BACKLOG_RULE={BACKLOG_RULE}', flush=True)
 
     def __init__(self):
-        self.manager = KVMemoryManager.get_instance()
+        pass
+
+    @property
+    def manager(self):
+        # Looked up per use: the global manager, or the query-local one in multi-query mode (KALYPSO_QUERY_SHARE).
+        return KVMemoryManager.get_instance()
 
     async def execute_tasks(self, ctxs, stages):
         """
@@ -172,6 +192,9 @@ class AsyncPipelineExecutor:
             for stage in stages
         }
         total_retries = 0
+
+        last_receive_at = {}
+        pending_moves = []
 
         def add_deferred_parent(stage_id: int, reserved_budget: int) -> None:
             deferred_parent_counts[stage_id] = (
@@ -208,20 +231,26 @@ class AsyncPipelineExecutor:
             # [sched] 08:03:11 finish task=12 stage=2
             # stage   used/cap GB  wait   run
             #     1   25.7/25.8     325     3  FULL
-            # FULL = has waiting tasks and memory >= 90% used.
             lines = [
-                f"[sched] {time.strftime('%H:%M:%S')} {event}",
-                f"{'stage':>5} {'used/cap GB':>13} {'wait':>5} {'run':>5}",
+                f"[sched] {time.strftime('%H:%M:%S')} {event}"
+                + (f" | moves {', '.join(pending_moves)}" if pending_moves else ""),
+                f"{'stage':>5} {'used/cap GB':>13} {'wait':>5} {'run':>5} {'defer GB':>8}",
             ]
             for stage in stages:
                 used, cap = self.manager.stage_usage(stage.stage_id)
                 wait, run = len(stage.waiting_tasks), len(stage.running_tasks)
-                full = "  FULL" if cap > 0 and used >= 0.9 * cap and wait > 0 else ""
+                head = stage.peek_task()
+                states = ["SATURATED" if stage.is_saturated() else "STARVING" if stage.is_starving() else "BALANCED"]
+                if head is not None and used + stage.estimate_budget(head) > cap:
+                    states.append("BLOCKED")
+                flags = "".join(f"  {st}" for st in states)
                 lines.append(
                     f"{stage.stage_id:>5}   {used / 1e9:5.1f}/{cap / 1e9:<5.1f} "
-                    f"{wait:>5} {run:>5}{full}"
+                    f"{wait:>5} {run:>5} "
+                    f"{deferred_parent_bytes.get(stage.stage_id, 0) / 1e9:8.1f}{flags}"
                 )
             print("\n".join(lines))
+            pending_moves.clear()
 
         async def finalize_task(task: Task):
             for tracker in task.trackers:
@@ -251,53 +280,123 @@ class AsyncPipelineExecutor:
         def has_pending_work():
             return any(stage.has_waiting_tasks() for stage in stages)
 
+        def pick_donor(receiver):
+            # 1st choice: starving stages, 2nd: busy stages (from the last stage);
+            # saturated stages never donate. Only free capacity can move.
+            for is_candidate in (lambda st: st.is_starving(),):
+                for stage in reversed(stages):
+                    if (
+                        stage is not receiver
+                        and is_candidate(stage)
+                        and self.manager.stage_free(stage.stage_id) > 0
+                    ):
+                        return stage
+            return None
+
         async def rebalance_stage_capacity():
             if not self.MEMORY_ADMISSION_CONTROL:
                 return
 
-            changed = False
-
             for stage in stages:
                 stage.tune_thresholds()
 
-            # Keep draining idle stages toward their floor so later stages
-            # can absorb capacity when they are the bottleneck.
-            for stage in stages:
-                if stage.ready_count() == 0 and stage.running_count() == 0:
-                    if await self.manager.return_stage_capacity(stage.stage_id, force_return=True):
-                        changed = True
+            def no_free_mem(stage):
+                head = stage.peek_task()
+                if head is None:
+                    return False
+                used, cap = self.manager.stage_usage(stage.stage_id)
+                return used + stage.estimate_budget(head) > cap
 
-            # Grow any stage with a saturated queue. Prefer borrowing from the
-            # immediate upstream stage first because that matches pipeline flow.
-            for idx, stage in enumerate(stages[1:]):
-                if not stage.is_saturated():
-                    continue
+            def backlog_needs_memory(stage):
+                head = stage.peek_task()
+                if head is None:
+                    return False
+                used, cap = self.manager.stage_usage(stage.stage_id)
+                return used + stage.estimate_budget(head) * stage.ready_count() > cap
 
-                if await self.manager.rebalance_stage_capacity(
-                    # The saturated stage itself receives the memory.
-                    receiver_id=stage.stage_id,
-                    donor_hint=stages[idx].stage_id,
-                ):
-                    changed = True
+            asked = set()
 
-            # If a later stage is empty while the previous stage still has work,
-            # bias capacity upstream so the pipeline can produce tuples for it.
-            for idx in range(1, len(stages)):
+            def memory_donor(receiver):
+                for st in reversed(stages):
+                    if (
+                        st is not receiver
+                        and st.is_starving()
+                        and not no_free_mem(st)
+                        and self.manager.stage_free(st.stage_id) > 0
+                    ):
+                        return st
+                for st in stages[:stages.index(receiver)]:
+                    if self.manager.stage_free(st.stage_id) > 0:
+                        return st
+                for st in stages:
+                    if (
+                        st is not receiver
+                        and st.stage_id not in asked
+                        and self.manager.stage_free(st.stage_id) > 0
+                    ):
+                        return st
+                candidates = [
+                    st for st in reversed(stages)
+                    if st is not receiver
+                    and not no_free_mem(st)
+                    and self.manager.stage_free(st.stage_id) > 0
+                ]
+                candidates.sort(key=lambda st: not st.is_starving())
+                return candidates[0] if candidates else None
+
+            def fanout(stage):
+                stat = stage_stat.get(stage.stage_id)
+                if stat and stat["input"] > 0 and stat["output"] > 0:
+                    return max(1.0, stat["output"] / stat["input"])
+                table = getattr(stage.fanout_op, "right_table", None)
+                return float(max(1, len(table))) if table else 1.0
+
+            def fanout_to_last(idx):
+                factor = 1.0
+                for st in stages[idx:-1]:
+                    factor *= fanout(st)
+                return factor ** self.FANOUT_ALPHA
+
+            def transfer_quantum(idx):
+                if self.TRANSFER_MODE in ("chunk", "mix"):
+                    return self.TRANSFER_QUANTUM / fanout_to_last(idx)
+                return self.TRANSFER_QUANTUM
+
+            def may_receive(idx):
+                if self.TRANSFER_MODE not in ("timer", "mix"):
+                    return True
+                last = last_receive_at.get(stages[idx].stage_id)
+                wait = self.RECEIVE_WAIT_S * fanout_to_last(idx)
+                return last is None or time.monotonic() - last >= wait
+
+            async def more_running(idx):
+                if idx < 0:
+                    return False
                 stage = stages[idx]
-                prev_stage = stages[idx - 1]
-    
-                if not (stage.is_starving()):
-                    continue
-                head_task = prev_stage.peek_task()
-                if head_task is None:
-                    continue
+                asked.add(stage.stage_id)
+                moved = False
+                if stage.ready_count() < stage.low_threshold:
+                    moved = await more_running(idx - 1)
+                if no_free_mem(stage) and may_receive(idx):
+                    donor = memory_donor(stage)
+                    _, cap_before = self.manager.stage_usage(stage.stage_id) if donor is not None else (0, 0)
+                    if donor is not None and await self.manager.transfer_capacity(
+                        donor.stage_id,
+                        stage.stage_id,
+                        quantum_fraction=transfer_quantum(idx),
+                        upstream=stages.index(donor) > idx,
+                    ):
+                        _, cap_after = self.manager.stage_usage(stage.stage_id)
+                        pending_moves.append(
+                            f"{donor.stage_id}->{stage.stage_id} {(cap_after - cap_before) / 1e9:.1f}GB"
+                        )
+                        last_receive_at[stage.stage_id] = time.monotonic()
+                        moved = True
+                return moved
 
-                if await self.manager.rebalance_stage_capacity(
-                    receiver_id=prev_stage.stage_id,
-                    donor_hint=stage.stage_id,
-                    upstream=True,
-                ):
-                    changed = True
+            if stages[-1].running_count() >= self.RUNNING_K and not (self.BACKLOG_RULE and no_free_mem(stages[-1])):
+                return
+            changed = await more_running(len(stages) - 1)
 
             if changed:
                 log_running_tasks("rebalance")
@@ -346,7 +445,14 @@ class AsyncPipelineExecutor:
                     log_running_tasks(
                         f"start task={task.task_id} stage={stage.stage_id}"
                     )
+                    # Live-memory admission (opt-in): the task carries its admission entry so its first
+                    # LLM request can be matched in vLLM; the entry is dropped when the task ends anyway.
+                    entry = self.manager.take_admit_entry()
+                    entry_token = _ADMIT_ENTRY.set(entry)
                     future = asyncio.create_task(stage.run_task(task))
+                    _ADMIT_ENTRY.reset(entry_token)
+                    if entry is not None:
+                        future.add_done_callback(lambda _f, e=entry: drop_admit_entry(e))
                     active[future] = (stage, task)
                     launched = True
 
@@ -395,8 +501,11 @@ class AsyncPipelineExecutor:
                     continue
                 break
 
+            # Opt-in admission settings (real KV usage, shared pool) can admit without a task finishing,
+            # so wake periodically to re-check; by default wait for a finish only.
             done, _ = await asyncio.wait(
                 set(active.keys()),
+                timeout=self.manager.poll_interval(),
                 return_when=asyncio.FIRST_COMPLETED,
             )
 

@@ -1,3 +1,4 @@
+from vllm.kalypso import op_usage
 from dataclasses import dataclass, field
 import math
 from itertools import count
@@ -23,6 +24,9 @@ class Task:
 
 
 class Stage:
+    LOW_THRESHOLD_RATIO = 0.2
+    STATE_MARGIN_RATIO = 0.1
+
     def __init__(
         self,
         stage_id: int,
@@ -40,7 +44,6 @@ class Stage:
         self.running_tasks = {}
         self.bytes_per_token = KVMemoryManager.get_instance().bytes_per_token
         self.low_threshold = 1
-        self.high_threshold = 5
 
     def _infer_behavior(self) -> OpBehavior:
         return OpBehavior.TUPLE_INDEPENDENT
@@ -79,11 +82,31 @@ class Stage:
     def running_count(self) -> int:
         return len(self.running_tasks)
 
-    def is_starving(self) -> bool:
-        return self.ready_count() < self.low_threshold
+    def task_size(self) -> int:
+        head = self.peek_task()
+        if head is not None:
+            return max(1, self.estimate_budget(head))
+        if self.running_tasks:
+            return max(1, sum(self.running_tasks.values()) // len(self.running_tasks))
+        manager = KVMemoryManager.get_instance()
+        return max(1, int(manager._stage_min_capacity.get(self.stage_id, 0)), int(self.bytes_per_token))
+
+    def free_memory(self) -> int:
+        used, cap = KVMemoryManager.get_instance().stage_usage(self.stage_id)
+        return max(0, int(cap - used))
+
+    def _demand_free_margin(self):
+        used, cap = KVMemoryManager.get_instance().stage_usage(self.stage_id)
+        demand = self.ready_count() * self.task_size()
+        return demand, max(0, int(cap - used)), self.STATE_MARGIN_RATIO * cap
 
     def is_saturated(self) -> bool:
-        return self.ready_count() > self.high_threshold
+        demand, free, margin = self._demand_free_margin()
+        return demand - free >= margin
+
+    def is_starving(self) -> bool:
+        demand, free, margin = self._demand_free_margin()
+        return free - demand >= margin
 
     def tune_thresholds(self):
         manager = KVMemoryManager.get_instance()
@@ -92,8 +115,7 @@ class Stage:
             min_budget = max(1, int(self.bytes_per_token))
 
         _, cur_cap = manager.stage_usage(self.stage_id)
-        self.high_threshold = max(1, int(1 * cur_cap // min_budget))
-        self.low_threshold = max(1, int(0.5 * cur_cap // min_budget))
+        self.low_threshold = max(1, int(self.LOW_THRESHOLD_RATIO * cur_cap // min_budget))
         # print(f'{self.stage_id}-{self.low_threshold}, self.is_starving(): {self.is_starving()}, self.is_saturated(): {self.is_saturated()}')
 
     def peek_task(self) -> Task | None:
@@ -181,10 +203,14 @@ class Stage:
                     if idx == task.op_index and task.retry_priority is not None
                     else -(self.priority_offset + idx)
                 )
-                keep_going = await op(
-                    task.ctx,
-                    priority=priority,
-                )
+                token = op_usage.current_op.set(op_usage.op_label(op, self.stage_id, idx))
+                try:
+                    keep_going = await op(
+                        task.ctx,
+                        priority=priority,
+                    )
+                finally:
+                    op_usage.current_op.reset(token)
                 if keep_going is RETRY_TASK:
                     return RetryTaskResult(
                         ctx=task.ctx,
