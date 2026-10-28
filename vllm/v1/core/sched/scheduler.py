@@ -57,10 +57,6 @@ logger = init_logger(__name__)
 
 
 class Scheduler(SchedulerInterface):
-    # Prompt (prefill) tokens actually computed, counting every start of a request,
-    # including recomputation after preemption; failed scheduling attempts add nothing.
-    prefill_tokens_scheduled = 0
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -800,8 +796,6 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
             request = self.requests[req_id]
-            if request.num_computed_tokens < request.num_tokens - 1:  # prefill, not a decode step
-                self.prefill_tokens_scheduled += num_scheduled_token
             request.num_computed_tokens += num_scheduled_token
 
             # NOTE: _free_encoder_inputs relies on num_computed_tokens, which

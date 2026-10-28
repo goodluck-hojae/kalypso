@@ -4,7 +4,6 @@ from fastapi import Request
 from vllm.entrypoints.openai.protocol import CompletionRequest, ChatCompletionRequest
 from vllm.kalypso.pin_registry import PinnedRequestRegistry
 from vllm.kalypso import op_usage
-from vllm.kalypso import budget as _budget
 
 from .executor import LLMExecutor, CompletionResult
 
@@ -29,15 +28,6 @@ class VLLMExecutor(LLMExecutor):
     
     def __init__(self, model: str):
         self.model = model
-
-    @staticmethod
-    def _tag_admit_entry(req, prefix):
-        """Live-memory admission: name the task's first request so its admission entry is dropped once vLLM has it."""
-        entry = _budget._ADMIT_ENTRY.get()
-        if entry is not None and entry in _budget._UNSEEN and _budget._UNSEEN[entry][1] is None:
-            _budget._UNSEEN[entry][1] = prefix + req.request_id
-            return entry
-        return None
 
     def _build_chat_request(self, message, max_tokens, pin, priority):
         return ChatCompletionRequest(
@@ -98,7 +88,6 @@ class VLLMExecutor(LLMExecutor):
         from vllm.entrypoints.openai.api_server import create_chat_completion
 
         req = self._build_chat_request(prompt, max_tokens, pin, priority)
-        entry = self._tag_admit_entry(req, "chatcmpl-")
         prompt_items = len(prompt) if isinstance(prompt, list) else 1
         self._log(
             "[vllm-exec] "
@@ -109,13 +98,10 @@ class VLLMExecutor(LLMExecutor):
             f"prompt_items={prompt_items}"
         )
 
-        try:
-            gen = await create_chat_completion(
-                request=req,
-                raw_request=raw_request,
-            )
-        finally:
-            _budget.drop_admit_entry(entry)
+        gen = await create_chat_completion(
+            request=req,
+            raw_request=raw_request,
+        )
         self._log(
             "[vllm-exec] "
             f"returned kind=chat "
@@ -163,7 +149,6 @@ class VLLMExecutor(LLMExecutor):
         from vllm.entrypoints.openai.api_server import create_completion
 
         req = self._build_request(prompt, max_tokens, pin, priority)
-        entry = self._tag_admit_entry(req, "cmpl-")
         prompt_len = len(prompt) if isinstance(prompt, str) else 1
         self._log(
             "[vllm-exec] "
