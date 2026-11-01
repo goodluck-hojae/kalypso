@@ -72,7 +72,7 @@ ready() {
 worker_urls=""
 for ((i=1; i<=n; i++)); do
     started=$SECONDS
-    VLLM_ENABLE_V1_MULTIPROCESSING=0 VLLM_CPU_KVCACHE_SPACE=${KV_GIB:-1} OMP_NUM_THREADS=$threads nohup "$python" -m vllm.entrypoints.openai.api_server --model "$model" --enable-prefix-caching --max-model-len 4096 --port "$((base+i))" > "$out/worker_$i.log" 2>&1 < /dev/null &
+    VLLM_SERVER_DEV_MODE=1 VLLM_ENABLE_V1_MULTIPROCESSING=0 VLLM_CPU_KVCACHE_SPACE=${KV_GIB:-1} OMP_NUM_THREADS=$threads nohup "$python" -m vllm.entrypoints.openai.api_server --model "$model" --enable-prefix-caching --max-model-len 4096 --port "$((base+i))" > "$out/worker_$i.log" 2>&1 < /dev/null &
     pids+=("$!")
     worker_urls+="${worker_urls:+,}http://localhost:$((base+i))"
     ready "http://localhost:$((base+i))/v1/models" "${WORKER_READY_TIMEOUT:-900}" "$out/worker_$i.log" "${pids[i-1]}"

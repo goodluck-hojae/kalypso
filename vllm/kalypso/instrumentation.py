@@ -115,6 +115,40 @@ class RequestRecorder:
 
 
 # ---------------------------------------------------------------------------
+# Worker concurrency limits (from vLLM's /server_info dev endpoint)
+# ---------------------------------------------------------------------------
+
+def parse_server_info(payload) -> dict:
+    """Pull the two concurrency caps out of a /server_info?config_format=json
+    response. Missing or malformed input gives nulls rather than an error."""
+    cfg = payload.get("vllm_config") if isinstance(payload, dict) else None
+    sched = cfg.get("scheduler_config") if isinstance(cfg, dict) else None
+    sched = sched if isinstance(sched, dict) else {}
+    return {
+        "max_num_seqs": sched.get("max_num_seqs"),
+        "max_num_batched_tokens": sched.get("max_num_batched_tokens"),
+    }
+
+
+async def fetch_server_limits(session, base_url: str) -> dict:
+    """GET {base_url}/server_info?config_format=json and return the caps.
+
+    /server_info only exists when the worker was started with
+    VLLM_SERVER_DEV_MODE=1. This never raises: on any failure the caps are null
+    and `error` says why, so a missing endpoint cannot stop the coordinator.
+    """
+    try:
+        async with session.get(
+            f"{base_url.rstrip('/')}/server_info", params={"config_format": "json"}
+        ) as resp:
+            resp.raise_for_status()
+            limits = parse_server_info(await resp.json())
+        return {**limits, "error": None}
+    except Exception as exc:
+        return {"max_num_seqs": None, "max_num_batched_tokens": None, "error": repr(exc)}
+
+
+# ---------------------------------------------------------------------------
 # Per-worker /metrics poller
 # ---------------------------------------------------------------------------
 

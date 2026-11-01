@@ -119,3 +119,60 @@ def test_record_worker_info_row_type():
     rec.record_worker_info(worker="w0", max_num_seqs=256)
     (row,) = rec.rows("worker_info")
     assert row["worker"] == "w0" and row["max_num_seqs"] == 256
+
+
+# ---------------------------------------------------------------------------
+# Worker concurrency limits (/server_info)
+# ---------------------------------------------------------------------------
+
+SERVER_INFO = {
+    "vllm_config": {
+        "scheduler_config": {"max_num_seqs": 128, "max_num_batched_tokens": 8192},
+        "cache_config": {"block_size": 16},
+    }
+}
+
+
+def test_parse_server_info():
+    assert instr.parse_server_info(SERVER_INFO) == {
+        "max_num_seqs": 128,
+        "max_num_batched_tokens": 8192,
+    }
+    nulls = {"max_num_seqs": None, "max_num_batched_tokens": None}
+    assert instr.parse_server_info({"vllm_config": "text form, not json"}) == nulls
+    assert instr.parse_server_info({"vllm_config": {}}) == nulls
+    assert instr.parse_server_info(None) == nulls
+
+
+def test_fetch_server_limits_asks_for_json_and_returns_caps():
+    async def go():
+        import aiohttp
+
+        w = FakeWorker(metrics_text(0, 0), server_info=SERVER_INFO)
+        await w.start()
+        try:
+            async with aiohttp.ClientSession() as s:
+                lim = await instr.fetch_server_limits(s, w.url + "/")
+        finally:
+            await w.stop()
+        assert lim == {"max_num_seqs": 128, "max_num_batched_tokens": 8192, "error": None}
+        assert w.info_queries == [{"config_format": "json"}]
+
+    run(go())
+
+
+def test_fetch_server_limits_without_dev_mode_is_null_not_fatal():
+    async def go():
+        import aiohttp
+
+        w = FakeWorker(metrics_text(0, 0))  # no /server_info route -> 404
+        await w.start()
+        try:
+            async with aiohttp.ClientSession() as s:
+                lim = await instr.fetch_server_limits(s, w.url)
+        finally:
+            await w.stop()
+        assert lim["max_num_seqs"] is None and lim["max_num_batched_tokens"] is None
+        assert "404" in lim["error"]
+
+    run(go())

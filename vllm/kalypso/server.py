@@ -4,8 +4,12 @@ Runs the semantic query processor in its own HTTP server and sends every LLM
 request to one of N separate `vllm serve` processes.
 
     # workers (each its own process / GPU), started with the Kalypso vLLM fork:
-    VLLM_ENABLE_V1_MULTIPROCESSING=0 vllm serve <model> --port 8001 --enable-prefix-caching
-    VLLM_ENABLE_V1_MULTIPROCESSING=0 vllm serve <model> --port 8002 --enable-prefix-caching
+    VLLM_SERVER_DEV_MODE=1 VLLM_ENABLE_V1_MULTIPROCESSING=0 vllm serve <model> --port 8001 --enable-prefix-caching
+    VLLM_SERVER_DEV_MODE=1 VLLM_ENABLE_V1_MULTIPROCESSING=0 vllm serve <model> --port 8002 --enable-prefix-caching
+
+    # VLLM_SERVER_DEV_MODE=1 exposes /server_info, which the coordinator reads once
+    # per worker to record max_num_seqs and max_num_batched_tokens. It also enables
+    # other dev endpoints, so use it only on trusted networks.
 
     # coordinator:
     python -m vllm.kalypso.server --port 8000 \
@@ -18,6 +22,7 @@ they called it on the single vLLM server.
 
 import argparse
 import asyncio
+import json
 import uuid
 from contextlib import asynccontextmanager
 
@@ -26,7 +31,11 @@ from fastapi import FastAPI, Request
 
 from vllm.kalypso import interface
 from vllm.kalypso import query as query_mod
-from vllm.kalypso.instrumentation import RequestRecorder, WorkerMetricsPoller
+from vllm.kalypso.instrumentation import (
+    RequestRecorder,
+    WorkerMetricsPoller,
+    fetch_server_limits,
+)
 from vllm.kalypso.query_processor import QueryProcessor
 from vllm.kalypso.results import format_results
 from vllm.kalypso.workers.http_executor import HttpVLLMExecutor
@@ -87,6 +96,22 @@ def build_app(args) -> FastAPI:
         )
         workers = pool.workers
         model_name = workers[0].model
+
+        # Concurrency caps per worker, once at startup. Needs workers started
+        # with VLLM_SERVER_DEV_MODE=1; if absent the values are null (not fatal).
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
+            limits = await asyncio.gather(*(fetch_server_limits(s, w.url) for w in workers))
+        app.state.worker_limits = {}
+        for w, lim in zip(workers, limits):
+            info = {"worker": w.name, "url": w.url, "model": w.model, **lim}
+            recorder.record_worker_info(**info)
+            app.state.worker_limits[w.name] = lim
+            print("[Coordinator] WORKER_LIMITS " + json.dumps(info, sort_keys=True))
+            if lim["max_num_seqs"] is None:
+                print(
+                    f"[Coordinator] WARNING: no concurrency caps for {w.name} "
+                    f"({lim['error']}); start workers with VLLM_SERVER_DEV_MODE=1"
+                )
 
         poller = WorkerMetricsPoller(
             {w.name: w.url for w in workers},
