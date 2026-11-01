@@ -41,3 +41,21 @@ An existing `src_old` must be a clean worktree at the same commit; an explicitly
 The script prints both commits, stops and waits for the old server before starting the new side, and cleans up servers on exit.
 Results are saved as `old.json`, `new.json`, their input CSVs, `old_server.log`, and `new_run/` with request records and logs; the exit status comes from harness `check` using old as baseline.
 Use `--help` for payload, model, port, and output options; relative paths resolve from this checkout's root.
+
+## Instrumentation output
+
+The coordinator writes one JSONL file (`--record-path`, `requests.jsonl` in a launch directory)
+with three row types; the full field list is in the docstring of `vllm/kalypso/instrumentation.py`.
+
+- `request`: one per LLM call (worker, operator, stage, row, submit/finish times, tokens, status).
+- `queue_sample`: one per worker every 0.5 s: waiting, running, `kv_cache_usage` (0-1), and the
+  cumulative `prefix_cache_queries` / `prefix_cache_hits`. For one run, subtract the first sample
+  of a worker from its last to get that run's queries and hits.
+- `worker_info`: one per worker at startup: `max_num_seqs` and `max_num_batched_tokens`.
+
+`worker_info` needs the workers started with `VLLM_SERVER_DEV_MODE=1` (`launch_multi_worker.sh` does
+this). Without it the two limits are null and the coordinator prints a warning; it still starts.
+That flag also enables other dev endpoints, so use it only on a trusted network.
+
+Each query's `QUERY_KV_STATS` log line also has a `per_worker` object with that worker's
+`prefix_tokens_queried`, `prefix_tokens_reused` and `prefix_hit_fraction` for the query.

@@ -176,3 +176,53 @@ def test_fetch_server_limits_without_dev_mode_is_null_not_fatal():
         assert "404" in lim["error"]
 
     run(go())
+
+
+# ---------------------------------------------------------------------------
+# Per-worker prefix-cache change over one query
+# ---------------------------------------------------------------------------
+
+def test_per_worker_prefix_delta_keeps_workers_separate():
+    before = {
+        "w0": {"prefix_queries": 100, "prefix_hits": 10},
+        "w1": {"prefix_queries": 0, "prefix_hits": 0},
+    }
+    after = {
+        "w0": {"prefix_queries": 300, "prefix_hits": 110},
+        "w1": {"prefix_queries": 50, "prefix_hits": 0},
+        "w2": {"prefix_queries": 8, "prefix_hits": 4},  # worker with no earlier snapshot
+    }
+    assert instr.per_worker_prefix_delta(before, after) == {
+        "w0": {"prefix_tokens_queried": 200, "prefix_tokens_reused": 100, "prefix_hit_fraction": 0.5},
+        "w1": {"prefix_tokens_queried": 50, "prefix_tokens_reused": 0, "prefix_hit_fraction": 0.0},
+        "w2": {"prefix_tokens_queried": 8, "prefix_tokens_reused": 4, "prefix_hit_fraction": 0.5},
+    }
+
+
+def test_per_worker_prefix_delta_never_negative_and_no_divide_by_zero():
+    before = {"w0": {"prefix_queries": 100, "prefix_hits": 50}}
+    after = {"w0": {"prefix_queries": 100, "prefix_hits": 40}}  # counter reset / restart
+    assert instr.per_worker_prefix_delta(before, after)["w0"] == {
+        "prefix_tokens_queried": 0, "prefix_tokens_reused": 0, "prefix_hit_fraction": 0.0,
+    }
+
+
+def test_poller_per_worker_prefix_reads_latest_counters():
+    async def go():
+        a = FakeWorker(metrics_text(0, 0, usage=0.1, queries=10, hits=3))
+        b = FakeWorker(metrics_text(0, 0, usage=0.2, queries=20, hits=9))
+        await a.start()
+        await b.start()
+        poller = instr.WorkerMetricsPoller({"w0": a.url, "w1": b.url}, instr.RequestRecorder())
+        try:
+            await poller.poll_once()
+        finally:
+            await poller.stop()
+            await a.stop()
+            await b.stop()
+        assert poller.per_worker_prefix() == {
+            "w0": {"prefix_queries": 10.0, "prefix_hits": 3.0},
+            "w1": {"prefix_queries": 20.0, "prefix_hits": 9.0},
+        }
+
+    run(go())

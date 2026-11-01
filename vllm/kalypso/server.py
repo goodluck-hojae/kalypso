@@ -35,6 +35,7 @@ from vllm.kalypso.instrumentation import (
     RequestRecorder,
     WorkerMetricsPoller,
     fetch_server_limits,
+    per_worker_prefix_delta,
 )
 from vllm.kalypso.query_processor import QueryProcessor
 from vllm.kalypso.results import format_results
@@ -72,7 +73,18 @@ class CoordinatorQueryProcessor(QueryProcessor):
         snap["llm_work_metrics_available"] = float(
             all(self.poller.has(n) for n in self._LLM_WORK_METRICS.values())
         )
+        # Per-worker prefix counters, so row affinity can be compared with the
+        # per-call policies. The totals above stay summed across workers.
+        snap["per_worker_prefix"] = self.poller.per_worker_prefix()
         return snap
+
+    @staticmethod
+    def _query_kv_delta(before, after):
+        stats = QueryProcessor._query_kv_delta(before, after)
+        stats["per_worker"] = per_worker_prefix_delta(
+            before.get("per_worker_prefix", {}), after.get("per_worker_prefix", {})
+        )
+        return stats
 
     async def _query_kv_snapshot(self):
         await self.poller.poll_once()

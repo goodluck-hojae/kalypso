@@ -149,6 +149,31 @@ async def fetch_server_limits(session, base_url: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Per-worker prefix-cache stats for one query
+# ---------------------------------------------------------------------------
+
+def per_worker_prefix_delta(before: dict, after: dict) -> dict:
+    """Per-worker prefix-cache change between two snapshots.
+
+    Each snapshot is {worker: {"prefix_queries": float, "prefix_hits": float}}
+    (cumulative vLLM counters). Key names match the query-level stats
+    (prefix_tokens_queried, prefix_tokens_reused, prefix_hit_fraction) so a
+    per-worker row reads the same as the whole-query row.
+    """
+    out = {}
+    for worker, now in after.items():
+        was = before.get(worker, {})
+        queried = max(0, round(now.get("prefix_queries", 0.0) - was.get("prefix_queries", 0.0)))
+        reused = max(0, round(now.get("prefix_hits", 0.0) - was.get("prefix_hits", 0.0)))
+        out[worker] = {
+            "prefix_tokens_queried": queried,
+            "prefix_tokens_reused": reused,
+            "prefix_hit_fraction": reused / queried if queried else 0.0,
+        }
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Per-worker /metrics poller
 # ---------------------------------------------------------------------------
 
@@ -247,6 +272,16 @@ class WorkerMetricsPoller:
             for n in out:
                 out[n] += sums.get(n, 0.0)
         return out
+
+    def per_worker_prefix(self) -> dict[str, dict[str, float]]:
+        """Latest cumulative prefix-cache counters for each worker (not summed)."""
+        return {
+            name: {
+                "prefix_queries": sums.get(self.PREFIX_QUERIES, 0.0),
+                "prefix_hits": sums.get(self.PREFIX_HITS, 0.0),
+            }
+            for name, sums in self.latest.items()
+        }
 
     def has(self, name: str) -> bool:
         return any(name in sums for sums in self.latest.values())

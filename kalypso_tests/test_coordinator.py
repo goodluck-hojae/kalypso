@@ -133,6 +133,10 @@ def test_query_stats_refresh_after_execution(monkeypatch, capsys, fail):
         poll_once=AsyncMock(side_effect=poll_once),
         totals=lambda names: {name: counters["cached"] for name in names},
         has=lambda name: True,
+        per_worker_prefix=lambda: {
+            "w0": {"prefix_queries": counters["cached"], "prefix_hits": 0},
+            "w1": {"prefix_queries": counters["cached"] * 2, "prefix_hits": counters["cached"]},
+        },
     )
     processor = server.CoordinatorQueryProcessor.__new__(server.CoordinatorQueryProcessor)
     processor.__dict__.update(
@@ -161,3 +165,8 @@ def test_query_stats_refresh_after_execution(monkeypatch, capsys, fail):
     stats = json.loads(line.split("QUERY_KV_STATS ", 1)[1])
     assert stats["prefix_tokens_queried"] == 7
     assert stats["prompt_tokens"] == 7
+    # per-worker prefix-cache change over the query (counters went 10 -> 17)
+    assert stats["per_worker"] == {
+        "w0": {"prefix_tokens_queried": 7, "prefix_tokens_reused": 0, "prefix_hit_fraction": 0.0},
+        "w1": {"prefix_tokens_queried": 14, "prefix_tokens_reused": 7, "prefix_hit_fraction": 0.5},
+    }
