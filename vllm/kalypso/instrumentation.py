@@ -1,10 +1,24 @@
 """Instrumentation v1 for multi-worker Kalypso.
 
-Two kinds of JSONL rows are produced, sharing one clock (seconds since the
+Three kinds of JSONL rows are produced, sharing one clock (seconds since the
 recorder was created, from time.monotonic):
 
   {"type": "request", ...}       one per LLM request (written by the executor)
   {"type": "queue_sample", ...}  one per worker per poll (written by the poller)
+  {"type": "worker_info", ...}   one per worker at startup (written by the server)
+
+Queue sample fields:
+  t, worker, waiting, running,
+  kv_cache_usage        vllm:kv_cache_usage_perc, a 0-1 fraction (null if the
+                        worker does not export it)
+  prefix_cache_queries  cumulative vllm:prefix_cache_queries_total (null if absent)
+  prefix_cache_hits     cumulative vllm:prefix_cache_hits_total (null if absent)
+  The prefix counters are cumulative: subtract the first sample of a run from
+  the last to get that run's per-worker queries and hits.
+
+Worker info fields:
+  worker, url, model, max_num_seqs, max_num_batched_tokens (null if the worker
+  was not started with VLLM_SERVER_DEV_MODE=1), error
 
 Request row fields:
   request_id, worker, operator, stage, position, row_idx, kind ("completion"|"chat"),
@@ -79,6 +93,9 @@ class RequestRecorder:
     def record_queue_sample(self, **fields) -> None:
         self._write({"type": "queue_sample", **fields})
 
+    def record_worker_info(self, **fields) -> None:
+        self._write({"type": "worker_info", **fields})
+
     def _write(self, row: dict) -> None:
         with self._lock:
             self._rows.append(row)
@@ -113,6 +130,9 @@ class WorkerMetricsPoller:
 
     WAITING = "vllm:num_requests_waiting"
     RUNNING = "vllm:num_requests_running"
+    KV_USAGE = "vllm:kv_cache_usage_perc"
+    PREFIX_QUERIES = "vllm:prefix_cache_queries_total"
+    PREFIX_HITS = "vllm:prefix_cache_hits_total"
 
     def __init__(
         self,
@@ -126,7 +146,14 @@ class WorkerMetricsPoller:
         self.recorder = recorder
         self.interval = interval
         self.scrape_timeout = scrape_timeout
-        self._wanted = {self.WAITING, self.RUNNING, *extra_metrics}
+        self._wanted = {
+            self.WAITING,
+            self.RUNNING,
+            self.KV_USAGE,
+            self.PREFIX_QUERIES,
+            self.PREFIX_HITS,
+            *extra_metrics,
+        }
         self.latest: dict[str, dict[str, float]] = {n: {} for n in self.workers}
         self.failures: dict[str, int] = {n: 0 for n in self.workers}
         self._session = None
@@ -169,6 +196,11 @@ class WorkerMetricsPoller:
             worker=name,
             waiting=sums.get(self.WAITING, 0.0),
             running=sums.get(self.RUNNING, 0.0),
+            # None (not 0) when a metric is missing, so "unknown" is never
+            # mistaken for "idle" or "no cache hits".
+            kv_cache_usage=sums.get(self.KV_USAGE),
+            prefix_cache_queries=sums.get(self.PREFIX_QUERIES),
+            prefix_cache_hits=sums.get(self.PREFIX_HITS),
         )
 
     async def poll_once(self) -> None:

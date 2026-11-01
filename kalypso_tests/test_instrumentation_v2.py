@@ -1,0 +1,121 @@
+"""Tests for the instrumentation additions: per-worker KV usage and
+prefix-cache counters on queue samples, worker limits from /server_info.
+
+No GPU and no vllm package needed: instrumentation.py is loaded by path.
+"""
+import asyncio
+import importlib.util
+import pathlib
+
+from aiohttp import web
+
+_path = pathlib.Path(__file__).resolve().parents[1] / "vllm/kalypso/instrumentation.py"
+_spec = importlib.util.spec_from_file_location("kalypso_instrumentation_under_test", _path)
+instr = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(instr)
+
+
+def metrics_text(waiting, running, usage=None, queries=None, hits=None):
+    lines = [
+        "# TYPE vllm:num_requests_waiting gauge",
+        f'vllm:num_requests_waiting{{engine="0",model_name="m"}} {waiting}',
+        "# TYPE vllm:num_requests_running gauge",
+        f'vllm:num_requests_running{{engine="0",model_name="m"}} {running}',
+    ]
+    if usage is not None:
+        lines += [
+            "# TYPE vllm:kv_cache_usage_perc gauge",
+            f'vllm:kv_cache_usage_perc{{engine="0",model_name="m"}} {usage}',
+        ]
+    if queries is not None:
+        lines += [
+            "# TYPE vllm:prefix_cache_queries counter",
+            f'vllm:prefix_cache_queries_total{{engine="0",model_name="m"}} {queries}',
+            f'vllm:prefix_cache_hits_total{{engine="0",model_name="m"}} {hits}',
+        ]
+    return "\n".join(lines) + "\n"
+
+
+class FakeWorker:
+    """A worker that serves a fixed /metrics page and, optionally, /server_info."""
+
+    def __init__(self, metrics, server_info=None):
+        self.metrics = metrics
+        self.server_info = server_info
+        app = web.Application()
+        app.router.add_get("/metrics", self._metrics)
+        if server_info is not None:
+            app.router.add_get("/server_info", self._info)
+        self.app = app
+        self.info_queries = []
+
+    async def start(self):
+        self.runner = web.AppRunner(self.app)
+        await self.runner.setup()
+        site = web.TCPSite(self.runner, "127.0.0.1", 0)
+        await site.start()
+        self.url = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
+
+    async def stop(self):
+        await self.runner.cleanup()
+
+    async def _metrics(self, req):
+        return web.Response(text=self.metrics)
+
+    async def _info(self, req):
+        self.info_queries.append(dict(req.query))
+        return web.json_response(self.server_info)
+
+
+def run(coro):
+    return asyncio.run(coro)
+
+
+def test_queue_samples_carry_per_worker_kv_usage_and_prefix_counters():
+    async def go():
+        a = FakeWorker(metrics_text(3, 2, usage=0.25, queries=1000, hits=400))
+        b = FakeWorker(metrics_text(0, 5, usage=0.80, queries=50, hits=5))
+        await a.start()
+        await b.start()
+        rec = instr.RequestRecorder()
+        poller = instr.WorkerMetricsPoller({"w0": a.url, "w1": b.url}, rec)
+        try:
+            await poller.poll_once()
+        finally:
+            await poller.stop()
+            await a.stop()
+            await b.stop()
+        by = {s["worker"]: s for s in rec.rows("queue_sample")}
+        # per-worker values, never summed across workers
+        assert (by["w0"]["kv_cache_usage"], by["w1"]["kv_cache_usage"]) == (0.25, 0.80)
+        assert (by["w0"]["prefix_cache_queries"], by["w0"]["prefix_cache_hits"]) == (1000, 400)
+        assert (by["w1"]["prefix_cache_queries"], by["w1"]["prefix_cache_hits"]) == (50, 5)
+        # existing fields are unchanged
+        assert (by["w0"]["waiting"], by["w0"]["running"]) == (3.0, 2.0)
+
+    run(go())
+
+
+def test_missing_metrics_are_null_not_zero():
+    async def go():
+        w = FakeWorker(metrics_text(1, 1))  # no kv usage, no prefix counters
+        await w.start()
+        rec = instr.RequestRecorder()
+        poller = instr.WorkerMetricsPoller({"w0": w.url}, rec)
+        try:
+            await poller.poll_once()
+        finally:
+            await poller.stop()
+            await w.stop()
+        (s,) = rec.rows("queue_sample")
+        assert s["kv_cache_usage"] is None
+        assert s["prefix_cache_queries"] is None and s["prefix_cache_hits"] is None
+
+    run(go())
+
+
+def test_record_worker_info_row_type():
+    rec = instr.RequestRecorder()
+    rec.record_worker_info(worker="w0", max_num_seqs=256)
+    (row,) = rec.rows("worker_info")
+    assert row["worker"] == "w0" and row["max_num_seqs"] == 256
