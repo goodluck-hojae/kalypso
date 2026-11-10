@@ -1,3 +1,2 @@
 
-from .plan import SemanticPlan  
-from .pipeline import SemanticPipeline
+from .plan import SemanticPlan
