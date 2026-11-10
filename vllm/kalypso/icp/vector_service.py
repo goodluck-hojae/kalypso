@@ -150,7 +150,7 @@ class FaissVS:
         start, end = lims[0], lims[1]
         for idx in range(start, end):
             score = float(D[idx])
-            if score <= low_threshold or score >= high_threshold:
+            if score <= low_threshold:
                 continue
             results.append({
                 "metadata": list(self.metadata[I[idx]]),
